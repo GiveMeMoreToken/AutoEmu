@@ -1,4 +1,4 @@
-"""Tests for code generators."""
+"""Tests for code generators (targeting QEMU v9.2.4)."""
 
 import tempfile
 from pathlib import Path
@@ -9,7 +9,10 @@ from autoemu.models.peripheral import Peripheral, PeripheralType
 from autoemu.models.interrupt import (
     InterruptModel, InterruptLine, InterruptFlag, FlagBehavior,
 )
-from autoemu.generators.qemu_generator import generate_peripheral_code
+from autoemu.generators.qemu_generator import (
+    generate_peripheral_code,
+    QEMU_TARGET_VERSION,
+)
 from autoemu.generators.test_generator import generate_test_harness
 
 
@@ -74,17 +77,21 @@ def _make_test_peripheral() -> Peripheral:
 
 
 class TestQEMUGenerator:
+    def test_target_version(self):
+        assert QEMU_TARGET_VERSION == "v9.2.4"
+
     def test_generates_files(self):
         periph = _make_test_peripheral()
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_peripheral_code(periph, tmpdir)
-            assert len(files) == 3
+            assert len(files) == 5  # .h, .c, meson.build, qtest .c, .json
 
-            paths = [Path(f) for f in files]
-            extensions = {p.suffix for p in paths}
-            assert ".h" in extensions
-            assert ".c" in extensions
-            assert ".json" in extensions
+            names = [Path(f).name for f in files]
+            assert "stm32_test_periph.h" in names
+            assert "stm32_test_periph.c" in names
+            assert "meson.build" in names
+            assert "qtest_stm32_test_periph.c" in names
+            assert "stm32_test_periph_model.json" in names
 
     def test_header_content(self):
         periph = _make_test_peripheral()
@@ -93,26 +100,65 @@ class TestQEMUGenerator:
             header = [f for f in files if f.endswith(".h")][0]
             content = Path(header).read_text()
 
+            assert "QEMU v9.2.4" in content
             assert "TYPE_STM32_TEST_PERIPH" in content
             assert "TEST_PERIPH_CR_OFFSET" in content
             assert "TEST_PERIPH_SR_OFFSET" in content
             assert "MemoryRegion mmio" in content
             assert "qemu_irq irq" in content
 
-    def test_source_content(self):
+    def test_source_v924_apis(self):
+        """Verify generated C code uses QEMU v9.2.4 APIs."""
         periph = _make_test_peripheral()
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_peripheral_code(periph, tmpdir)
-            source = [f for f in files if f.endswith(".c")][0]
+            source = [f for f in files if Path(f).name == "stm32_test_periph.c"][0]
             content = Path(source).read_text()
 
+            # Core functions present
             assert "stm32_test_periph_read" in content
             assert "stm32_test_periph_write" in content
             assert "stm32_test_periph_reset" in content
             assert "MemoryRegionOps" in content
             assert "type_register_static" in content
-            # Check W1C handling
             assert "Write-1-to-clear" in content
+
+            # QEMU v9.2.4 specific: device_class_set_legacy_reset
+            assert "device_class_set_legacy_reset" in content
+            assert "dc->reset" not in content
+
+            # QEMU v9.2.4 specific: hw/qdev-properties.h
+            assert 'hw/qdev-properties.h' in content
+
+            # VMSTATE uses bare field names (not s->field)
+            assert "VMSTATE_UINT32(cr," in content
+            assert "VMSTATE_UINT32(s->" not in content
+
+    def test_meson_build(self):
+        periph = _make_test_peripheral()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_peripheral_code(periph, tmpdir)
+            meson = [f for f in files if Path(f).name == "meson.build"][0]
+            content = Path(meson).read_text()
+
+            assert "system_ss.add" in content
+            assert "CONFIG_STM32_TEST_PERIPH" in content
+            assert "stm32_test_periph.c" in content
+            assert QEMU_TARGET_VERSION in content
+
+    def test_qtest_content(self):
+        periph = _make_test_peripheral()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_peripheral_code(periph, tmpdir)
+            qtest = [f for f in files if "qtest_" in Path(f).name][0]
+            content = Path(qtest).read_text()
+
+            assert "libqtest.h" in content
+            assert "qtest_init" in content
+            assert "qtest_readl" in content
+            assert "g_test_run" in content
+            assert "test_test_periph_reset" in content
+            assert QEMU_TARGET_VERSION in content
 
 
 class TestTestGenerator:
