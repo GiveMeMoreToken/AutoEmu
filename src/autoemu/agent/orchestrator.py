@@ -1,8 +1,8 @@
-"""Agent orchestrator using claude-agent-sdk.
+"""Agent orchestrator for the AutoEmu modeling pipeline.
 
-This is the core of AutoEmu's LLM-driven modeling pipeline. It creates
-a Claude agent with MCP tools for parsing, analysis, generation, and
-validation, then drives the modeling workflow through structured prompts.
+Uses the abstract :class:`AgentBackend` interface so that the pipeline
+works identically regardless of whether claude-agent-sdk or openai-agents
+is used underneath.
 """
 
 from __future__ import annotations
@@ -13,20 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    AssistantMessage,
-    ResultMessage,
-    StreamEvent,
-    SystemMessage,
-    TextBlock,
-    ToolUseBlock,
-    ToolResultBlock,
-    create_sdk_mcp_server,
-    query,
-)
-
+from autoemu.agent.backend import AgentBackend, AgentEvent
+from autoemu.agent.backends import create_backend
 from autoemu.agent.prompts import (
     SYSTEM_PROMPT,
     REGISTER_EXTRACTION_PROMPT,
@@ -35,7 +23,7 @@ from autoemu.agent.prompts import (
     DEPENDENCY_ANALYSIS_PROMPT,
     QEMU_GENERATION_PROMPT,
 )
-from autoemu.agent.tools import ALL_TOOLS, TOOL_NAMES
+from autoemu.agent.tools import ALL_TOOLS
 
 
 @dataclass
@@ -68,9 +56,7 @@ class ModelingResult:
 
 
 def _build_extraction_prompt(task: ModelingTask) -> str:
-    """Build the prompt for register extraction phase."""
     parts = [REGISTER_EXTRACTION_PROMPT.format(peripheral_name=task.peripheral_name)]
-
     if task.svd_path:
         parts.append(
             f"\nSVD file available at: {task.svd_path}\n"
@@ -86,7 +72,6 @@ def _build_extraction_prompt(task: ModelingTask) -> str:
             "\nNo SVD or header files provided. Use your knowledge of "
             f"{task.mcu_family} {task.peripheral_name} to build the register model."
         )
-
     parts.append(
         f"\nAfter extraction, use build_peripheral_model to create the model "
         f"with peripheral_type appropriate for {task.peripheral_name}."
@@ -95,9 +80,7 @@ def _build_extraction_prompt(task: ModelingTask) -> str:
 
 
 def _build_analysis_prompt(task: ModelingTask) -> str:
-    """Build the prompt for driver analysis phase."""
     parts = [BEHAVIOR_INFERENCE_PROMPT.format(peripheral_name=task.peripheral_name)]
-
     if task.driver_paths:
         for dp in task.driver_paths:
             parts.append(f"\nDriver source file: {dp}")
@@ -110,7 +93,6 @@ def _build_analysis_prompt(task: ModelingTask) -> str:
             f"\nNo driver files provided. Use your knowledge of STM32 HAL "
             f"driver patterns for {task.peripheral_name} to infer behavior."
         )
-
     parts.append(
         "\nAfter analysis, use build_state_machine to create the "
         "peripheral's state machine model."
@@ -119,7 +101,6 @@ def _build_analysis_prompt(task: ModelingTask) -> str:
 
 
 def _build_interrupt_prompt(task: ModelingTask) -> str:
-    """Build the prompt for interrupt analysis phase."""
     prompt = INTERRUPT_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
         "\n\nUse build_interrupt_model to create the interrupt model. "
@@ -129,7 +110,6 @@ def _build_interrupt_prompt(task: ModelingTask) -> str:
 
 
 def _build_dependency_prompt(task: ModelingTask) -> str:
-    """Build the prompt for dependency analysis phase."""
     prompt = DEPENDENCY_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
         f"\n\nUse build_dependency_graph to create the dependency graph "
@@ -139,7 +119,6 @@ def _build_dependency_prompt(task: ModelingTask) -> str:
 
 
 def _build_generation_prompt(task: ModelingTask) -> str:
-    """Build the prompt for code generation phase."""
     prompt = QEMU_GENERATION_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
         f"\n\nUse generate_qemu_peripheral with output_dir='{task.output_dir}' "
@@ -150,7 +129,6 @@ def _build_generation_prompt(task: ModelingTask) -> str:
 
 
 def _build_validation_prompt(task: ModelingTask) -> str:
-    """Build the prompt for validation phase."""
     return (
         f"Validate the generated peripheral model for '{task.peripheral_name}':\n"
         f"1. Use validate_register_model to check register consistency\n"
@@ -171,53 +149,42 @@ _PHASE_PROMPT_BUILDERS = {
 
 
 class AutoEmuOrchestrator:
-    """Orchestrates the LLM-driven peripheral modeling pipeline."""
+    """Orchestrates the LLM-driven peripheral modeling pipeline.
+
+    Args:
+        backend: Backend name (``"claude"`` or ``"openai"``), or an
+                 :class:`AgentBackend` instance directly.
+        model: Model identifier override.
+        max_budget_usd: Spending cap for the run.
+        verbose: Whether to emit verbose progress messages.
+    """
 
     def __init__(
         self,
+        backend: str | AgentBackend = "claude",
         model: str | None = None,
         max_budget_usd: float = 5.0,
         verbose: bool = False,
     ):
+        if isinstance(backend, str):
+            self._backend = create_backend(backend)
+        else:
+            self._backend = backend
         self.model = model
         self.max_budget_usd = max_budget_usd
         self.verbose = verbose
-        self._mcp_server = create_sdk_mcp_server(
-            "autoemu",
-            version="0.1.0",
-            tools=ALL_TOOLS,
-        )
 
-    def _build_options(self, cwd: str | None = None) -> ClaudeAgentOptions:
-        opts = ClaudeAgentOptions(
-            system_prompt=SYSTEM_PROMPT,
-            mcp_servers={"autoemu": self._mcp_server},
-            allowed_tools=TOOL_NAMES,
-            permission_mode="bypassPermissions",
-            max_budget_usd=self.max_budget_usd,
-        )
-        if self.model:
-            opts.model = self.model
-        if cwd:
-            opts.cwd = cwd
-        return opts
+    @property
+    def backend(self) -> AgentBackend:
+        return self._backend
 
     async def model_peripheral(
         self,
         task: ModelingTask,
         on_message: Any | None = None,
     ) -> ModelingResult:
-        """Run the full modeling pipeline for a peripheral.
-
-        Args:
-            task: The modeling task specification.
-            on_message: Optional callback(phase, text) for progress updates.
-
-        Returns:
-            ModelingResult with generated files and validation results.
-        """
+        """Run the full modeling pipeline for a peripheral."""
         result = ModelingResult(peripheral_name=task.peripheral_name)
-        options = self._build_options(cwd=task.output_dir)
         total_cost = 0.0
 
         try:
@@ -232,26 +199,31 @@ class AutoEmuOrchestrator:
                 prompt = builder(task)
                 phase_text: list[str] = []
 
-                async for msg in query(prompt=prompt, options=options):
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                phase_text.append(block.text)
-                                if on_message:
-                                    on_message(phase, block.text)
-                            elif isinstance(block, ToolUseBlock):
-                                if self.verbose and on_message:
-                                    on_message(
-                                        phase,
-                                        f"[tool] {block.name}({json.dumps(block.input)[:200]}...)"
-                                    )
-                    elif isinstance(msg, ResultMessage):
-                        if msg.total_cost_usd:
-                            total_cost += msg.total_cost_usd
-                        if msg.is_error:
-                            result.error = msg.result or "Unknown error"
-                            result.total_cost_usd = total_cost
-                            return result
+                async for event in self._backend.run(
+                    prompt,
+                    system_prompt=SYSTEM_PROMPT,
+                    tools=ALL_TOOLS,
+                    model=self.model,
+                    max_budget_usd=self.max_budget_usd,
+                    cwd=task.output_dir,
+                ):
+                    if event.type == "text":
+                        phase_text.append(event.text)
+                        if on_message:
+                            on_message(phase, event.text)
+                    elif event.type == "tool_call":
+                        if self.verbose and on_message:
+                            on_message(
+                                phase,
+                                f"[tool] {event.tool_name}({event.tool_input[:200]}...)"
+                            )
+                    elif event.type == "error":
+                        result.error = event.text
+                        total_cost += event.cost_usd
+                        result.total_cost_usd = total_cost
+                        return result
+                    elif event.type == "complete":
+                        total_cost += event.cost_usd
 
                 result.phases_completed.append(phase)
                 result.agent_messages.extend(phase_text)
@@ -259,7 +231,6 @@ class AutoEmuOrchestrator:
         except Exception as e:
             result.error = str(e)
 
-        # Collect generated files
         output_path = Path(task.output_dir)
         if output_path.exists():
             result.generated_files = [
@@ -280,8 +251,6 @@ class AutoEmuOrchestrator:
 
         Yields (phase, text) tuples as the agent works.
         """
-        options = self._build_options(cwd=task.output_dir)
-
         for phase in task.phases:
             yield (phase, f"=== Phase: {phase} ===")
 
@@ -291,34 +260,33 @@ class AutoEmuOrchestrator:
 
             prompt = builder(task)
 
-            async for msg in query(prompt=prompt, options=options):
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, TextBlock):
-                            yield (phase, block.text)
-                        elif isinstance(block, ToolUseBlock):
-                            yield (phase, f"[tool:{block.name}]")
-                elif isinstance(msg, ResultMessage):
-                    cost = msg.total_cost_usd or 0
-                    yield (phase, f"[phase complete, cost: ${cost:.4f}]")
-                    if msg.is_error:
-                        yield (phase, f"[error] {msg.result}")
-                        return
+            async for event in self._backend.run(
+                prompt,
+                system_prompt=SYSTEM_PROMPT,
+                tools=ALL_TOOLS,
+                model=self.model,
+                max_budget_usd=self.max_budget_usd,
+                cwd=task.output_dir,
+            ):
+                if event.type == "text":
+                    yield (phase, event.text)
+                elif event.type == "tool_call":
+                    yield (phase, f"[tool:{event.tool_name}]")
+                elif event.type == "complete":
+                    yield (phase, f"[phase complete, cost: ${event.cost_usd:.4f}]")
+                elif event.type == "error":
+                    yield (phase, f"[error] {event.text}")
+                    return
 
     async def single_query(self, prompt: str) -> str:
         """Run a single free-form query against the agent."""
-        options = self._build_options()
-        result_parts: list[str] = []
-
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        result_parts.append(block.text)
-            elif isinstance(msg, ResultMessage):
-                break
-
-        return "\n".join(result_parts)
+        return await self._backend.run_to_text(
+            prompt,
+            system_prompt=SYSTEM_PROMPT,
+            tools=ALL_TOOLS,
+            model=self.model,
+            max_budget_usd=self.max_budget_usd,
+        )
 
     async def batch_model(
         self,
@@ -327,7 +295,6 @@ class AutoEmuOrchestrator:
     ) -> list[ModelingResult]:
         """Model multiple peripherals, with limited concurrency."""
         semaphore = asyncio.Semaphore(max_concurrent)
-        results: list[ModelingResult] = []
 
         async def _run(task: ModelingTask) -> ModelingResult:
             async with semaphore:

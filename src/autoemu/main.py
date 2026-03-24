@@ -42,7 +42,9 @@ def cli():
 @click.option("--phases", default="extract,analyze,infer,connect,generate,validate",
               help="Comma-separated phases to run")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-def model(peripheral, mcu, svd, header, driver, output, model, budget, phases, verbose):
+@click.option("--backend", "-b", default="claude", type=click.Choice(["claude", "openai"]),
+              help="Agent backend to use")
+def model(peripheral, mcu, svd, header, driver, output, model, budget, phases, verbose, backend):
     """Model a peripheral using the LLM agent pipeline.
 
     PERIPHERAL is the name of the peripheral to model (e.g., ETH, USB_OTG_FS, DMA1).
@@ -61,12 +63,14 @@ def model(peripheral, mcu, svd, header, driver, output, model, budget, phases, v
         f"[bold]AutoEmu Peripheral Modeling[/bold]\n"
         f"Peripheral: {peripheral}\n"
         f"MCU Family: {mcu}\n"
+        f"Backend: {backend}\n"
         f"Phases: {', '.join(task.phases)}\n"
         f"Output: {output}",
         title="Configuration",
     ))
 
     orchestrator = AutoEmuOrchestrator(
+        backend=backend,
         model=model,
         max_budget_usd=budget,
         verbose=verbose,
@@ -203,11 +207,13 @@ def validate(peripheral_json):
 
 @cli.command()
 @click.argument("prompt", type=str)
-@click.option("--model", default=None, help="Claude model to use")
+@click.option("--model", default=None, help="Model to use")
 @click.option("--budget", default=2.0, help="Max budget in USD")
-def query(prompt, model, budget):
+@click.option("--backend", "-b", default="claude", type=click.Choice(["claude", "openai"]),
+              help="Agent backend to use")
+def query(prompt, model, budget, backend):
     """Send a free-form query to the AutoEmu agent."""
-    orchestrator = AutoEmuOrchestrator(model=model, max_budget_usd=budget)
+    orchestrator = AutoEmuOrchestrator(backend=backend, model=model, max_budget_usd=budget)
     result = _run_async(orchestrator.single_query(prompt))
     console.print(result)
 
@@ -216,7 +222,9 @@ def query(prompt, model, budget):
 @click.option("--mcu", default="STM32F4", help="MCU family")
 @click.option("--output", "-o", default="output", help="Output directory")
 @click.option("--budget", default=10.0, help="Max budget in USD")
-def batch(mcu, output, budget):
+@click.option("--backend", "-b", default="claude", type=click.Choice(["claude", "openai"]),
+              help="Agent backend to use")
+def batch(mcu, output, budget, backend):
     """Model all supported peripherals in batch mode."""
     tasks = [
         ModelingTask(
@@ -227,7 +235,7 @@ def batch(mcu, output, budget):
         for name in ["DMA1", "ETH", "USB_OTG_FS", "SUBGHZ"]
     ]
 
-    orchestrator = AutoEmuOrchestrator(max_budget_usd=budget)
+    orchestrator = AutoEmuOrchestrator(backend=backend, max_budget_usd=budget)
 
     console.print(f"Batch modeling {len(tasks)} peripherals...")
     results = _run_async(orchestrator.batch_model(tasks))
