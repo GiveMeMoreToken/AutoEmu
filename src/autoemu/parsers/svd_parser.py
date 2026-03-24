@@ -40,7 +40,9 @@ def _int(element: etree._Element, tag: str, default: int = 0) -> int:
     return int(text)
 
 
-def _parse_access(element: etree._Element, parent_access: AccessType = AccessType.RW) -> AccessType:
+def _parse_access(
+    element: etree._Element, parent_access: AccessType = AccessType.RW
+) -> AccessType:
     text = _text(element, "access")
     return _SVD_ACCESS_MAP.get(text, parent_access)
 
@@ -140,10 +142,19 @@ def parse_peripheral(periph_elem: etree._Element) -> RegisterBlock:
                 base_offset = _int(reg_elem, "addressOffset")
 
                 if dim_index:
-                    indices = dim_index.split(",") if "," in dim_index else [
-                        str(i) for i in range(int(dim_index.split("-")[0]),
-                                               int(dim_index.split("-")[1]) + 1)
-                    ] if "-" in dim_index else [str(i) for i in range(dim)]
+                    indices = (
+                        dim_index.split(",")
+                        if "," in dim_index
+                        else [
+                            str(i)
+                            for i in range(
+                                int(dim_index.split("-")[0]),
+                                int(dim_index.split("-")[1]) + 1,
+                            )
+                        ]
+                        if "-" in dim_index
+                        else [str(i) for i in range(dim)]
+                    )
                 else:
                     indices = [str(i) for i in range(dim)]
 
@@ -178,23 +189,23 @@ def parse_svd_file(path: str | Path) -> dict[str, RegisterBlock]:
     tree = etree.parse(str(path))
     root = tree.getroot()
 
-    # Build derivedFrom lookup
-    periph_elements: dict[str, etree._Element] = {}
-    for periph_elem in root.findall(".//peripheral"):
-        name = _text(periph_elem, "name")
-        if name:
-            periph_elements[name] = periph_elem
+    # Collect all peripheral elements
+    periph_elements: list[etree._Element] = root.findall(".//peripheral")
+
+    # Sort: non-derived first, then derived (so base peripherals are available)
+    non_derived = [e for e in periph_elements if not e.get("derivedFrom")]
+    derived = [e for e in periph_elements if e.get("derivedFrom")]
 
     results: dict[str, RegisterBlock] = {}
-    for periph_elem in root.findall(".//peripheral"):
+    for periph_elem in non_derived + derived:
         name = _text(periph_elem, "name")
         if not name:
             continue
 
-        derived = periph_elem.get("derivedFrom")
-        if derived and derived in results:
+        derived_from = periph_elem.get("derivedFrom")
+        if derived_from and derived_from in results:
             # Clone from base peripheral
-            base = results[derived].model_copy(deep=True)
+            base = results[derived_from].model_copy(deep=True)
             base.name = name
             base.base_address = _int(periph_elem, "baseAddress", base.base_address)
             desc = _text(periph_elem, "description")
@@ -211,14 +222,21 @@ def parse_svd_string(xml_content: str) -> dict[str, RegisterBlock]:
     """Parse SVD XML content from a string."""
     root = etree.fromstring(xml_content.encode())
 
+    # Collect all peripheral elements
+    periph_elements: list[etree._Element] = root.findall(".//peripheral")
+
+    # Sort: non-derived first, then derived (so base peripherals are available)
+    non_derived = [e for e in periph_elements if not e.get("derivedFrom")]
+    derived = [e for e in periph_elements if e.get("derivedFrom")]
+
     results: dict[str, RegisterBlock] = {}
-    for periph_elem in root.findall(".//peripheral"):
+    for periph_elem in non_derived + derived:
         name = _text(periph_elem, "name")
         if not name:
             continue
-        derived = periph_elem.get("derivedFrom")
-        if derived and derived in results:
-            base = results[derived].model_copy(deep=True)
+        derived_from = periph_elem.get("derivedFrom")
+        if derived_from and derived_from in results:
+            base = results[derived_from].model_copy(deep=True)
             base.name = name
             base.base_address = _int(periph_elem, "baseAddress", base.base_address)
             results[name] = base

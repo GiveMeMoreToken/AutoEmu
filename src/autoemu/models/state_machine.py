@@ -17,7 +17,9 @@ class Transition(BaseModel):
     actions: list[str] = Field(default_factory=list)  # Actions on transition
     priority: int = 0
 
-    def matches(self, trigger_source: str, context: dict[str, Any] | None = None) -> bool:
+    def matches(
+        self, trigger_source: str, context: dict[str, Any] | None = None
+    ) -> bool:
         """Check if this transition matches the given trigger."""
         if not self.trigger:
             return False
@@ -83,7 +85,6 @@ class StateMachine(BaseModel):
         candidates = self.get_transitions_from(self.current_state)
         for t in candidates:
             if t.matches(trigger_source, context):
-                old_state = self.current_state
                 self.current_state = t.target
                 return t.target
         return None
@@ -116,7 +117,7 @@ class StateMachine(BaseModel):
         for s in self.states:
             shape = "doublecircle" if s.is_final else "circle"
             if s.is_initial:
-                lines.append(f'  __start [shape=point];')
+                lines.append(f"  __start [shape=point];")
                 lines.append(f'  __start -> "{s.name}";')
             lines.append(f'  "{s.name}" [shape={shape}];')
         for t in self.transitions:
