@@ -1,4 +1,4 @@
-"""Agent orchestrator for the AutoEmu modeling pipeline.
+"""Prompt-driven agent orchestrator for the AutoEmu modeling pipeline.
 
 Uses the abstract :class:`AgentBackend` interface so that the pipeline
 works identically regardless of whether claude-agent-sdk or openai-agents
@@ -16,12 +16,12 @@ from typing import Any, AsyncIterator
 from autoemu.agent.backend import AgentBackend, AgentEvent
 from autoemu.agent.backends import create_backend
 from autoemu.agent.prompts import (
-    SYSTEM_PROMPT,
     REGISTER_EXTRACTION_PROMPT,
     BEHAVIOR_INFERENCE_PROMPT,
     INTERRUPT_ANALYSIS_PROMPT,
     DEPENDENCY_ANALYSIS_PROMPT,
     QEMU_GENERATION_PROMPT,
+    build_system_prompt,
 )
 from autoemu.agent.tools import ALL_TOOLS
 
@@ -50,6 +50,30 @@ class ModelingResult:
     phases_completed: list[str] = field(default_factory=list)
     generated_files: list[str] = field(default_factory=list)
     validation_issues: list[dict[str, str]] = field(default_factory=list)
+    total_cost_usd: float = 0.0
+    error: str = ""
+    agent_messages: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FetchTask:
+    """Source-data fetch task."""
+
+    target_mcu: str
+    target_peripheral: str
+    output_dir: str = "data/stm32"
+    refresh: bool = False
+
+
+@dataclass
+class FetchResult:
+    """Result of a source-data fetch run."""
+
+    target_mcu: str
+    target_peripheral: str
+    success: bool = False
+    fetched_files: list[str] = field(default_factory=list)
+    manifest_files: list[str] = field(default_factory=list)
     total_cost_usd: float = 0.0
     error: str = ""
     agent_messages: list[str] = field(default_factory=list)
@@ -94,8 +118,9 @@ def _build_analysis_prompt(task: ModelingTask) -> str:
             f"driver patterns for {task.peripheral_name} to infer behavior."
         )
     parts.append(
-        "\nAfter analysis, use build_state_machine to create the "
-        "peripheral's state machine model."
+        "\nAfter analysis, prefer infer_state_machine to derive the "
+        "peripheral's state machine model from the driver analysis. "
+        "Use build_state_machine only if manual refinement is necessary."
     )
     return "\n".join(parts)
 
@@ -103,7 +128,8 @@ def _build_analysis_prompt(task: ModelingTask) -> str:
 def _build_interrupt_prompt(task: ModelingTask) -> str:
     prompt = INTERRUPT_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
-        "\n\nUse build_interrupt_model to create the interrupt model. "
+        "\n\nPrefer infer_interrupt_model after driver analysis and register extraction. "
+        "Use build_interrupt_model only if manual refinement is necessary. "
         "Include all IRQ lines, status flags, enable bits, and event mappings."
     )
     return prompt
@@ -112,8 +138,9 @@ def _build_interrupt_prompt(task: ModelingTask) -> str:
 def _build_dependency_prompt(task: ModelingTask) -> str:
     prompt = DEPENDENCY_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
-        f"\n\nUse build_dependency_graph to create the dependency graph "
-        f"for {task.mcu_family}. Include DMA, clock, trigger, and GPIO dependencies."
+        f"\n\nPrefer infer_dependency_graph after driver analysis, documentation review, "
+        f"and interrupt modeling. Use build_dependency_graph only for manual refinement. "
+        f"Include DMA, clock, trigger, EXTI, and GPIO dependencies for {task.mcu_family}."
     )
     return prompt
 
@@ -121,9 +148,12 @@ def _build_dependency_prompt(task: ModelingTask) -> str:
 def _build_generation_prompt(task: ModelingTask) -> str:
     prompt = QEMU_GENERATION_PROMPT.format(peripheral_name=task.peripheral_name)
     prompt += (
-        f"\n\nUse generate_qemu_peripheral with output_dir='{task.output_dir}' "
-        f"to generate the QEMU C code. Then use generate_test_harness to "
-        f"create validation tests."
+        f"\n\nIf you have raw SVD/header/driver inputs and need the whole flow from scratch, "
+        f"prefer run_model_pipeline with output_dir='{task.output_dir}'. "
+        f"\n\nPrefer generate_model_bundle with output_dir='{task.output_dir}' "
+        f"to assemble the peripheral, emit QEMU artifacts, and write validation reports. "
+        f"Use generate_qemu_peripheral and generate_test_harness only when manual refinement "
+        f"is required."
     )
     return prompt
 
@@ -131,10 +161,26 @@ def _build_generation_prompt(task: ModelingTask) -> str:
 def _build_validation_prompt(task: ModelingTask) -> str:
     return (
         f"Validate the generated peripheral model for '{task.peripheral_name}':\n"
-        f"1. Use validate_register_model to check register consistency\n"
-        f"2. Use validate_behavior to check against driver patterns\n"
-        f"3. Review the generated QEMU code for correctness\n"
-        f"4. Report any issues found and suggest fixes\n"
+        f"1. Prefer the validation report produced by generate_model_bundle\n"
+        f"2. Use validate_register_model to check register consistency\n"
+        f"3. Use validate_behavior to check against driver patterns\n"
+        f"4. Review the generated QEMU code for correctness\n"
+        f"5. Report any issues found and suggest fixes\n"
+    )
+
+
+def _build_fetch_prompt(task: FetchTask) -> str:
+    return (
+        "Collect STM32 input data for the requested MCU and peripheral target.\n"
+        f"Target MCU: {task.target_mcu}\n"
+        f"Target peripheral: {task.target_peripheral}\n"
+        f"Output directory: {task.output_dir}\n"
+        f"Refresh existing files: {task.refresh}\n\n"
+        "Use fetch_data to perform the acquisition. "
+        f"Pass target_mcu='{task.target_mcu}', "
+        f"target_peripheral='{task.target_peripheral}', "
+        f"output_dir='{task.output_dir}', refresh={str(task.refresh)}.\n"
+        "After the tool runs, summarize the manifest paths and any unresolved assets."
     )
 
 
@@ -201,7 +247,7 @@ class AutoEmuOrchestrator:
 
                 async for event in self._backend.run(
                     prompt,
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=build_system_prompt(mode="model", cwd=task.output_dir),
                     tools=ALL_TOOLS,
                     model=self.model,
                     max_budget_usd=self.max_budget_usd,
@@ -262,7 +308,7 @@ class AutoEmuOrchestrator:
 
             async for event in self._backend.run(
                 prompt,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=build_system_prompt(mode="model", cwd=task.output_dir),
                 tools=ALL_TOOLS,
                 model=self.model,
                 max_budget_usd=self.max_budget_usd,
@@ -282,11 +328,76 @@ class AutoEmuOrchestrator:
         """Run a single free-form query against the agent."""
         return await self._backend.run_to_text(
             prompt,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(mode="model"),
             tools=ALL_TOOLS,
             model=self.model,
             max_budget_usd=self.max_budget_usd,
         )
+
+    async def fetch_input_data(
+        self,
+        task: FetchTask,
+        on_message: Any | None = None,
+    ) -> FetchResult:
+        """Run the input-data collection flow through the agent backend."""
+        result = FetchResult(
+            target_mcu=task.target_mcu,
+            target_peripheral=task.target_peripheral,
+        )
+        total_cost = 0.0
+
+        try:
+            prompt = _build_fetch_prompt(task)
+            phase_text: list[str] = []
+
+            async for event in self._backend.run(
+                prompt,
+                system_prompt=build_system_prompt(mode="fetch", cwd=task.output_dir),
+                tools=ALL_TOOLS,
+                model=self.model,
+                max_budget_usd=self.max_budget_usd,
+                cwd=task.output_dir,
+            ):
+                if event.type == "text":
+                    phase_text.append(event.text)
+                    if on_message:
+                        on_message("fetch", event.text)
+                elif event.type == "tool_call":
+                    if self.verbose and on_message:
+                        on_message(
+                            "fetch",
+                            f"[tool] {event.tool_name}({event.tool_input[:200]}...)",
+                        )
+                elif event.type == "error":
+                    result.error = event.text
+                    total_cost += event.cost_usd
+                    result.total_cost_usd = total_cost
+                    return result
+                elif event.type == "complete":
+                    total_cost += event.cost_usd
+
+            result.agent_messages.extend(phase_text)
+        except Exception as e:
+            result.error = str(e)
+
+        output_path = Path(task.output_dir)
+        if output_path.exists():
+            result.fetched_files = [
+                str(path.relative_to(output_path))
+                for path in output_path.rglob("*")
+                if path.is_file()
+            ]
+            manifests_dir = output_path / "manifests"
+            if manifests_dir.exists():
+                result.manifest_files = [
+                    str(path.relative_to(output_path))
+                    for path in manifests_dir.glob("*.json")
+                    if path.is_file()
+                ]
+
+        result.success = not result.error
+        result.total_cost_usd = total_cost
+        return result
 
     async def batch_model(
         self,

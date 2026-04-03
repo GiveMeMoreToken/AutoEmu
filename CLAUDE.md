@@ -5,10 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Test Commands
 
 ```bash
-pip install -e ".[dev]"        # Install in editable mode with dev deps
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent
+pip install -e ".[dev]"         # Install in editable mode with dev deps
 pytest                          # Run all tests
 pytest tests/test_models.py -v  # Run a specific test file
 pytest -k "test_w1c" -v         # Run tests matching a pattern
+pyinstaller autoemu.spec --clean  # Build the CLI binary at dist/autoemu
 ```
 
 Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — async test functions are detected automatically without explicit markers.
@@ -17,19 +19,19 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — async test functions
 
 The `autoemu` CLI (Click-based, entry point in `src/autoemu/main.py`) has these commands:
 
-- `autoemu model PERIPHERAL` — LLM-driven 6-phase pipeline (extract → analyze → infer → connect → generate → validate)
-- `autoemu builtin PERIPHERAL` — Generate from built-in templates (DMA1, DMA2, ETH, USB_OTG_FS, USB_OTG_HS, SUBGHZ), no LLM required
-- `autoemu parse-svd FILE` — Parse an SVD file and display register maps
-- `autoemu analyze FILE` — Analyze HAL/LL driver source for register access patterns
-- `autoemu validate FILE` — Validate a peripheral model JSON
-- `autoemu query PROMPT` — Free-form LLM query
-- `autoemu batch` — Batch-model multiple peripherals
+- `autoemu fetch-data --target-mcu MCU --target-peripheral PERIPH` — Fetch the input bundle for one target.
+- `autoemu build-qemu-peripheral --target-mcu MCU --target-peripheral PERIPH` — Run the full modeling pipeline from fetched data and emit QEMU-ready artifacts.
 
-All LLM commands accept `-b/--backend claude|openai` to select the agent backend.
+Both commands flow through `src/autoemu/agent/runtime.py`. The default backend is the local harness runtime. Set `AUTOEMU_AGENT_BACKEND=claude` or `AUTOEMU_AGENT_BACKEND=openai` to route the same workflow through an external agent backend.
+
+The binary-first workflow is:
+1. Build `dist/autoemu` with PyInstaller.
+2. Run `fetch-data`.
+3. Run `build-qemu-peripheral`.
 
 ## Architecture
 
-**Pipeline flow:** SVD/headers/drivers → Parsers → Pydantic models → Agent (6 phases) → QEMU C code generator → Validators
+**Public flow:** CLI → agent runtime (`runtime.py`) → harness backend or LLM orchestrator → deterministic tools/pipeline → QEMU generator → validators
 
 ### Models (`src/autoemu/models/`)
 Pydantic v2 models forming the core data layer. `Peripheral` is the top-level model containing a `RegisterBlock` (with `Register`/`BitField`), optional `StateMachine`, `InterruptModel`, and `DependencyGraph`. Register access semantics (W1C, RC_W1, W1S, etc.) are enforced in `Register.apply_write()`/`apply_read()`.
@@ -43,19 +45,23 @@ Three input parsers, all returning model objects:
 ### Agent (`src/autoemu/agent/`)
 Abstract backend pattern with `AgentBackend` base class (`backend.py`). Two implementations in `backends/`: `ClaudeBackend` (claude-agent-sdk) and `OpenAIAgentsBackend` (openai-agents). Factory: `create_backend("claude"|"openai")`.
 
-`tools.py` defines 16 `ToolSpec` objects (backend-agnostic tool definitions with async handlers). The `orchestrator.py` runs the 6-phase pipeline, each phase sending a phase-specific prompt (`prompts.py`) with the full tool set to the agent backend. Events stream as `AgentEvent` (text, tool_call, complete, error).
+`tools.py` defines the backend-agnostic `ToolSpec` registry. `runtime.py` is the harness-first entrypoint used by the CLI. `orchestrator.py` runs the 6-phase prompt-driven pipeline when an external LLM backend is selected. Events stream as `AgentEvent` (text, tool_call, complete, error).
+
+The STM32 fetch flow also runs through the agent backend. It uses the same tool registry plus repository-local constraints from `AGENTS.md`.
 
 ### Generators (`src/autoemu/generators/`)
 - `qemu_generator` — Produces `.h`, `.c`, `meson.build`, QTest harness, and model JSON per peripheral
 - `test_generator` — Produces standalone C test harnesses for reset values, W1C behavior, RO protection, field isolation
 
-### Built-in Peripherals (`src/autoemu/peripherals/`)
-Pre-built `Peripheral` constructors for DMA, Ethernet, USB OTG, and Sub-GHz radio. Each returns a fully populated model without needing LLM inference.
-
 ### Validators (`src/autoemu/validators/`)
 - `register_validator` — Structural checks (overlapping offsets/fields, duplicate names, access conflicts)
 - `behavior_validator` — Cross-validates model against driver analysis (missing registers, ISR mismatches)
 - `driver_replay` — Replays register write/read sequences against the model
+
+## Probe Harnesses
+
+- `scripts/run_stm32_guest_firmware.sh` builds and runs the bare-metal probe firmware.
+- `scripts/run_stm32_linux_probe_qemu.sh` builds the Buildroot rootfs and Linux kernel as needed, then boots to a BusyBox shell on `ttyAMA0`.
 
 ## QEMU Code Generation Constraints
 
@@ -72,4 +78,4 @@ All generated C code targets **QEMU v9.2.4** specifically. Key API choices:
 - All agent/tool operations are async
 - Pydantic v2 API throughout (`model_validate()`, `model_dump()`, not v1 `.dict()`/`.parse_obj()`)
 - Tool handlers return `dict[str, Any]` with a consistent shape (success/error keys)
-- Generated output goes to `output/` by default (git-ignored along with `qemu-9.2.4/`)
+- Generated output goes to `output/` by default. External source trees live under `build/*-src/`.

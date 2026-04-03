@@ -26,9 +26,7 @@ htmlcov/
 
 # Generated output
 output/
-
-# QEMU source and build
-qemu-9.2.4/
+*.log
 
 # OS
 .DS_Store
@@ -37,3 +35,5 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+data/

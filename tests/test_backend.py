@@ -25,7 +25,28 @@ class TestToolSpec:
         assert TOOL_NAMES == [t.name for t in ALL_TOOLS]
 
     def test_tool_count(self):
-        assert len(ALL_TOOLS) == 16
+        assert len(ALL_TOOLS) == 23
+
+    def test_fetch_tool_registered(self):
+        assert "fetch_data" in TOOL_NAMES
+
+    def test_register_extraction_tool_registered(self):
+        assert "extract_register_structure" in TOOL_NAMES
+
+    def test_state_machine_inference_tool_registered(self):
+        assert "infer_state_machine" in TOOL_NAMES
+
+    def test_interrupt_model_inference_tool_registered(self):
+        assert "infer_interrupt_model" in TOOL_NAMES
+
+    def test_dependency_graph_inference_tool_registered(self):
+        assert "infer_dependency_graph" in TOOL_NAMES
+
+    def test_model_bundle_generation_tool_registered(self):
+        assert "generate_model_bundle" in TOOL_NAMES
+
+    def test_pipeline_tool_registered(self):
+        assert "run_model_pipeline" in TOOL_NAMES
 
     def test_tool_has_handler(self):
         for t in ALL_TOOLS:

@@ -81,7 +81,7 @@ class DriverAnalysis:
 
 # Patterns for STM32 HAL/LL driver analysis
 _RE_HAL_REG_WRITE = re.compile(
-    r"(\w+)->(\w+)\s*=\s*(.+?);"
+    r"((?:\w+->)*)?(\w+)->(\w+)\s*=\s*(.+?);"
 )
 _RE_HAL_REG_READ = re.compile(
     r"(?:(\w+)\s*=\s*)?(\w+)->(\w+)\s*;"
@@ -97,6 +97,9 @@ _RE_MODIFY_REG = re.compile(
 )
 _RE_READ_BIT = re.compile(
     r"READ_BIT\s*\(\s*(?:\w+->)*(\w+)->(\w+)\s*,\s*(.+?)\s*\)"
+)
+_RE_READ_REG = re.compile(
+    r"(\w+)\s*=\s*READ_REG\s*\(\s*(?:\w+->)*(\w+)->(\w+)\s*\)"
 )
 _RE_FLAG_CHECK = re.compile(
     r"__HAL_(\w+)_GET_FLAG\s*\(\s*\w+\s*,\s*(\w+)\s*\)"
@@ -125,6 +128,29 @@ _RE_DMA_INIT = re.compile(
 _RE_HAL_CALLBACK = re.compile(
     r"HAL_(\w+)_(\w+)Callback\s*\("
 )
+_RE_MASK_CHECK = re.compile(
+    r"\(\s*(\w+)\s*&\s*([A-Z][A-Z0-9_]+)\s*\)\s*!=\s*(?:\(uint32_t\))?0U?",
+)
+_RE_CLEAR_CALL = re.compile(
+    r"__HAL_[A-Z0-9_]*CLEAR[A-Z0-9_]*\s*\((.*?)\)\s*;",
+    re.DOTALL,
+)
+
+
+def _unique_in_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _looks_like_enable_register(register_name: str) -> bool:
+    normalized = register_name.upper()
+    return any(token in normalized for token in ("IER", "IMR", "MSK", "MASK", "CR"))
 
 
 def _extract_function_bodies(content: str) -> dict[str, str]:
@@ -212,10 +238,15 @@ def _extract_register_accesses(
         ))
 
     for m in _RE_HAL_REG_WRITE.finditer(body):
-        if m.group(2) not in ("Instance", "hdma", "State", "ErrorCode"):
+        chain = m.group(1) or ""
+        parent = m.group(2)
+        register = m.group(3)
+        value_expr = m.group(4)
+        is_mmio_write = parent == "Instance" or "Instance->" in chain or parent.isupper()
+        if is_mmio_write and register not in ("Instance", "hdma", "State", "ErrorCode"):
             accesses.append(RegisterAccess(
-                register=m.group(2), access_type="write",
-                value_expr=m.group(3),
+                register=register, access_type="write",
+                value_expr=value_expr,
                 source_file=source_file, in_function=func_name, context=context,
             ))
 
@@ -227,6 +258,7 @@ def _extract_isr_pattern(
 ) -> ISRPattern:
     """Extract ISR pattern from an interrupt handler function."""
     pattern = ISRPattern(function_name=func_name, peripheral=peripheral)
+    read_reg_aliases: dict[str, str] = {}
 
     for m in _RE_FLAG_CHECK.finditer(body):
         pattern.checked_flags.append(m.group(2))
@@ -236,6 +268,26 @@ def _extract_isr_pattern(
         pattern.enabled_checks.append(m.group(2))
     for m in _RE_HAL_CALLBACK.finditer(body):
         pattern.callbacks.append(f"HAL_{m.group(1)}_{m.group(2)}Callback")
+    for m in _RE_READ_REG.finditer(body):
+        read_reg_aliases[m.group(1)] = m.group(3)
+    for m in _RE_MASK_CHECK.finditer(body):
+        alias = m.group(1)
+        symbol = m.group(2)
+        if _looks_like_enable_register(read_reg_aliases.get(alias, "")):
+            pattern.enabled_checks.append(symbol)
+        else:
+            pattern.checked_flags.append(symbol)
+    for m in _RE_CLEAR_CALL.finditer(body):
+        symbols = re.findall(r"\b[A-Z][A-Z0-9_]+\b", m.group(1))
+        for symbol in symbols:
+            if symbol.startswith("__HAL_"):
+                continue
+            pattern.cleared_flags.append(symbol)
+
+    pattern.checked_flags = _unique_in_order(pattern.checked_flags)
+    pattern.cleared_flags = _unique_in_order(pattern.cleared_flags)
+    pattern.enabled_checks = _unique_in_order(pattern.enabled_checks)
+    pattern.callbacks = _unique_in_order(pattern.callbacks)
 
     return pattern
 

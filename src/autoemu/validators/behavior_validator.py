@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from autoemu.modeling_utils import canonical_flag_name, is_non_mmio_register
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.register import AccessType
 
@@ -31,9 +32,12 @@ def validate_behavior(
     accessed_registers = set()
     for access in driver_analysis.get("register_accesses", []):
         if isinstance(access, dict):
-            accessed_registers.add(access.get("register", ""))
+            reg_name = access.get("register", "")
         else:
-            accessed_registers.add(getattr(access, "register", ""))
+            reg_name = getattr(access, "register", "")
+        if is_non_mmio_register(reg_name):
+            continue
+        accessed_registers.add(reg_name)
 
     model_registers = {r.name for r in peripheral.register_block.registers}
     for reg_name in accessed_registers:
@@ -58,7 +62,8 @@ def validate_behavior(
             cleared = isr.get("cleared_flags", []) if isinstance(isr, dict) else getattr(isr, "cleared_flags", [])
 
             for flag in checked:
-                if flag not in model_flags:
+                canonical = canonical_flag_name(flag)
+                if canonical not in model_flags:
                     issues.append({
                         "severity": "warning",
                         "message": (
@@ -66,7 +71,8 @@ def validate_behavior(
                         ),
                     })
             for flag in cleared:
-                if flag not in model_flags:
+                canonical = canonical_flag_name(flag)
+                if canonical not in model_flags:
                     issues.append({
                         "severity": "warning",
                         "message": (

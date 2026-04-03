@@ -27,7 +27,9 @@ class StructField:
     c_type: str
     offset: int  # byte offset within struct
     array_size: int = 1
+    access: AccessType = AccessType.RW
     is_reserved: bool = False
+    description: str = ""
 
 
 @dataclass
@@ -45,12 +47,13 @@ _RE_STRUCT_START = re.compile(
     r"typedef\s+struct\s*(?:\w+)?\s*\{"
 )
 _RE_STRUCT_FIELD = re.compile(
-    r"^\s*(?:__IO|__I|__O|volatile|const)?\s*(uint\d+_t|int\d+_t)\s+(\w+)"
-    r"(?:\[(\d+)\])?\s*;"
+    r"^\s*(?P<qualifiers>(?:(?:__IO|__I|__O|__IOM|__IM|__OM|volatile|const)\s+)*)"
+    r"(?P<c_type>uint\d+_t|int\d+_t)\s+(?P<name>\w+)"
+    r"(?:\[(?P<array_size>\d+)\])?\s*;\s*(?P<comment>/\*.*?\*/)?\s*$"
 )
 _RE_STRUCT_RESERVED = re.compile(
-    r"^\s*(?:__IO|__I|__O|volatile|const)?\s*uint32_t\s+(RESERVED\w*)"
-    r"(?:\[(\d+)\])?\s*;"
+    r"^\s*(?:(?:__IO|__I|__O|__IOM|__IM|__OM|volatile|const)\s+)*uint32_t\s+(RESERVED\w*)"
+    r"(?:\[(\d+)\])?\s*;\s*(/\*.*?\*/)?\s*$"
 )
 _RE_STRUCT_END = re.compile(
     r"^\s*\}\s*(\w+)_TypeDef\s*;"
@@ -90,6 +93,40 @@ def parse_macros(content: str) -> list[MacroDef]:
     return macros
 
 
+def _access_from_qualifiers(qualifiers: str) -> AccessType:
+    text = qualifiers or ""
+    tokens = set(text.split())
+    if {"__O", "__OM"} & tokens:
+        return AccessType.WO
+    if {"__I", "__IM"} & tokens or "const" in tokens:
+        return AccessType.RO
+    return AccessType.RW
+
+
+def _strip_comment_markers(comment: str) -> str:
+    cleaned = comment.strip()
+    if cleaned.startswith("/*"):
+        cleaned = cleaned[2:]
+    if cleaned.endswith("*/"):
+        cleaned = cleaned[:-2]
+    return cleaned.replace("!<", "").replace("<!", "").strip(" *")
+
+
+def _infer_access_from_description(description: str, default: AccessType) -> AccessType:
+    text = description.lower()
+    if "write 1 to clear" in text or "cleared by writing 1" in text:
+        return AccessType.W1C
+    if "write 1 to set" in text or "set by writing 1" in text:
+        return AccessType.W1S
+    if "write 0 to clear" in text or "cleared by writing 0" in text:
+        return AccessType.W0C
+    if "read only" in text:
+        return AccessType.RO
+    if "write only" in text:
+        return AccessType.WO
+    return default
+
+
 def parse_typedef_structs(content: str) -> list[TypedefStruct]:
     """Extract typedef struct definitions (peripheral register layouts)."""
     structs: list[TypedefStruct] = []
@@ -120,7 +157,9 @@ def parse_typedef_structs(content: str) -> list[TypedefStruct]:
                         c_type="uint32_t",
                         offset=offset,
                         array_size=arr_size,
+                        access=AccessType.RW,
                         is_reserved=True,
+                        description=_strip_comment_markers(res_match.group(3) or ""),
                     ))
                     offset += 4 * arr_size
                     i += 1
@@ -129,17 +168,24 @@ def parse_typedef_structs(content: str) -> list[TypedefStruct]:
                 # Regular fields
                 field_match = _RE_STRUCT_FIELD.match(line)
                 if field_match:
-                    c_type = field_match.group(1)
-                    name = field_match.group(2)
-                    arr_size = int(field_match.group(3)) if field_match.group(3) else 1
+                    c_type = field_match.group("c_type")
+                    name = field_match.group("name")
+                    arr_size = int(field_match.group("array_size")) if field_match.group("array_size") else 1
                     type_size = _TYPE_SIZES.get(c_type, 4)
                     is_res = name.upper().startswith("RESERVED")
+                    description = _strip_comment_markers(field_match.group("comment") or "")
+                    access = _infer_access_from_description(
+                        description,
+                        _access_from_qualifiers(field_match.group("qualifiers") or ""),
+                    )
                     fields.append(StructField(
                         name=name,
                         c_type=c_type,
                         offset=offset,
                         array_size=arr_size,
+                        access=access,
                         is_reserved=is_res,
+                        description=description,
                     ))
                     offset += type_size * arr_size
                 i += 1
@@ -250,7 +296,8 @@ def struct_to_register_block(
                 name=reg_name,
                 offset=offset,
                 size=size,
-                access=AccessType.RW,
+                description=sf.description,
+                access=sf.access,
                 reset_value=0,
                 fields=fields,
             ))

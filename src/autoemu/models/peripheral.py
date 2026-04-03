@@ -55,6 +55,7 @@ class Peripheral(BaseModel):
     register_block: RegisterBlock = Field(default_factory=lambda: RegisterBlock(name=""))
     state_machines: list[StateMachine] = Field(default_factory=list)
     interrupt_model: InterruptModel | None = None
+    dependencies: DependencyGraph | None = None
     clock: ClockConfig = Field(default_factory=ClockConfig)
 
     # Runtime state

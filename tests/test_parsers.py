@@ -6,7 +6,9 @@ from autoemu.parsers.header_parser import (
     parse_typedef_structs,
     parse_base_addresses,
     parse_bit_definitions,
+    parse_header_file,
 )
+from autoemu.parsers.register_extractor import merge_register_blocks, extract_register_blocks
 from autoemu.parsers.driver_parser import analyze_driver_string
 
 
@@ -85,16 +87,62 @@ class TestSVDParser:
         assert pe.bit_width == 1
         assert pe.access.value == "RO"
 
+    def test_parse_semantic_access(self):
+        svd = """\
+<?xml version="1.0" encoding="utf-8"?>
+<device>
+  <peripherals>
+    <peripheral>
+      <name>TIMX</name>
+      <baseAddress>0x40000000</baseAddress>
+      <registers>
+        <register>
+          <name>SR</name>
+          <addressOffset>0x00</addressOffset>
+          <fields>
+            <field>
+              <name>UIF</name>
+              <bitOffset>0</bitOffset>
+              <bitWidth>1</bitWidth>
+              <modifiedWriteValues>oneToClear</modifiedWriteValues>
+            </field>
+            <field>
+              <name>CAP</name>
+              <bitOffset>1</bitOffset>
+              <bitWidth>1</bitWidth>
+              <modifiedWriteValues>oneToClear</modifiedWriteValues>
+              <readAction>clear</readAction>
+            </field>
+            <field>
+              <name>SYNC</name>
+              <bitOffset>2</bitOffset>
+              <bitWidth>1</bitWidth>
+              <readAction>set</readAction>
+            </field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>
+"""
+        blocks = parse_svd_string(svd)
+        sr = blocks["TIMX"].get_register("SR")
+        assert sr is not None
+        assert sr.get_field("UIF").access.value == "W1C"
+        assert sr.get_field("CAP").access.value == "RC_W1"
+        assert sr.get_field("SYNC").access.value == "RS"
+
 
 class TestHeaderParser:
     HEADER_SAMPLE = """\
 typedef struct {
-  __IO uint32_t CR1;
-  __IO uint32_t CR2;
-  __IO uint32_t SR;
+  __IO uint32_t CR1; /*!< Control register 1 */
+  __O  uint32_t CR2; /*!< Write only trigger register */
+  __I  uint32_t SR;  /*!< Read only status register */
   __IO uint32_t DR;
   uint32_t RESERVED0[2];
-  __IO uint32_t CCR;
+  __IO uint32_t CCR; /*!< End of conversion flag cleared by writing 1 */
 } ADC_TypeDef;
 
 #define PERIPH_BASE       (0x40000000UL)
@@ -129,6 +177,115 @@ typedef struct {
         names = [f.name for f in fields]
         assert "EOCIE" in names
         assert "SCAN" in names
+
+    def test_parse_header_access(self, tmp_path):
+        header = tmp_path / "adc.h"
+        header.write_text(self.HEADER_SAMPLE)
+        block = parse_header_file(header, "ADC")["ADC"]
+
+        assert block.get_register("CR1").access.value == "RW"
+        assert block.get_register("CR2").access.value == "WO"
+        assert block.get_register("SR").access.value == "RO"
+        assert block.get_register("CCR").access.value == "W1C"
+        assert "Control register 1" in block.get_register("CR1").description
+
+
+class TestRegisterExtractor:
+    def test_merge_register_blocks_prefers_semantic_primary(self):
+        primary = parse_svd_string("""\
+<?xml version="1.0" encoding="utf-8"?>
+<device>
+  <peripherals>
+    <peripheral>
+      <name>USART1</name>
+      <baseAddress>0x40011000</baseAddress>
+      <registers>
+        <register>
+          <name>SR</name>
+          <addressOffset>0x00</addressOffset>
+          <resetValue>0x1</resetValue>
+          <fields>
+            <field>
+              <name>TC</name>
+              <bitOffset>6</bitOffset>
+              <bitWidth>1</bitWidth>
+              <modifiedWriteValues>oneToClear</modifiedWriteValues>
+            </field>
+          </fields>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>
+""")["USART1"]
+        secondary = parse_header_file(
+            _write_tmp_header(
+                """\
+typedef struct {
+  __I uint32_t SR; /*!< Status register */
+} USART1_TypeDef;
+
+#define PERIPH_BASE  (0x40000000UL)
+#define APB2PERIPH_BASE (PERIPH_BASE + 0x00010000UL)
+#define USART1_BASE (APB2PERIPH_BASE + 0x1000UL)
+""",
+            ),
+            "USART1",
+        )["USART1"]
+
+        merged = merge_register_blocks(primary, secondary)
+        sr = merged.get_register("SR")
+        assert sr is not None
+        assert sr.description == "Status register"
+        assert sr.access.value == "RO"
+        assert sr.get_field("TC").access.value == "W1C"
+
+    def test_extract_register_blocks_resolves_eth_alias(self, tmp_path):
+        svd = tmp_path / "eth.svd"
+        svd.write_text(
+            """\
+<?xml version="1.0" encoding="utf-8"?>
+<device>
+  <peripherals>
+    <peripheral>
+      <name>Ethernet_MAC</name>
+      <baseAddress>0x40028000</baseAddress>
+      <registers>
+        <register>
+          <name>MACCR</name>
+          <addressOffset>0x00</addressOffset>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral>
+      <name>Ethernet_DMA</name>
+      <baseAddress>0x40029000</baseAddress>
+      <registers>
+        <register>
+          <name>DMABMR</name>
+          <addressOffset>0x00</addressOffset>
+        </register>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>
+""",
+            encoding="utf-8",
+        )
+
+        blocks = extract_register_blocks(svd_path=svd, peripheral_name="ETH")
+        assert sorted(blocks) == ["Ethernet_DMA", "Ethernet_MAC"]
+
+
+def _write_tmp_header(content: str) -> str:
+    import tempfile
+    from pathlib import Path
+
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".h", delete=False)
+    tmp.write(content)
+    tmp.flush()
+    tmp.close()
+    return str(Path(tmp.name))
 
 
 class TestDriverParser:
@@ -172,3 +329,57 @@ void HAL_ADC_IRQHandler(ADC_HandleTypeDef *hadc)
         assert "ADC_FLAG_EOC" in isr.checked_flags
         assert "ADC_FLAG_EOC" in isr.cleared_flags
         assert any("ConvCplt" in cb for cb in isr.callbacks)
+
+    def test_analyze_isr_direct_register_masks(self):
+        analysis = analyze_driver_string(
+            """\
+void HAL_ETH_IRQHandler(ETH_HandleTypeDef *heth)
+{
+    uint32_t dma_flag = READ_REG(heth->Instance->DMASR);
+    uint32_t dma_itsource = READ_REG(heth->Instance->DMAIER);
+
+    if (((dma_flag & ETH_DMASR_RS) != 0U) && ((dma_itsource & ETH_DMAIER_RIE) != 0U))
+    {
+        __HAL_ETH_DMA_CLEAR_IT(heth, ETH_DMASR_RS | ETH_DMASR_NIS);
+        HAL_ETH_RxCpltCallback(heth);
+    }
+
+    if (((dma_flag & ETH_DMASR_TS) != 0U) && ((dma_itsource & ETH_DMAIER_TIE) != 0U))
+    {
+        __HAL_ETH_DMA_CLEAR_IT(heth, ETH_DMASR_TS | ETH_DMASR_NIS);
+        HAL_ETH_TxCpltCallback(heth);
+    }
+}
+""",
+            "ETH",
+        )
+
+        assert len(analysis.isr_patterns) == 1
+        isr = analysis.isr_patterns[0]
+        assert "ETH_DMASR_RS" in isr.checked_flags
+        assert "ETH_DMASR_TS" in isr.checked_flags
+        assert "ETH_DMAIER_RIE" in isr.enabled_checks
+        assert "ETH_DMAIER_TIE" in isr.enabled_checks
+        assert "ETH_DMASR_NIS" in isr.cleared_flags
+        assert any("RxCplt" in cb for cb in isr.callbacks)
+        assert any("TxCplt" in cb for cb in isr.callbacks)
+
+    def test_raw_register_write_ignores_non_mmio_struct_members(self):
+        analysis = analyze_driver_string(
+            """\
+void HAL_ETH_Foo(ETH_HandleTypeDef *heth)
+{
+    heth->gState = HAL_BUSY;
+    heth->TxCpltCallback = NULL;
+    heth->Instance->DMASR = 0;
+    EXTI->PR = 1;
+}
+""",
+            "ETH",
+        )
+
+        written_regs = [a.register for a in analysis.register_accesses if a.access_type == "write"]
+        assert "DMASR" in written_regs
+        assert "PR" in written_regs
+        assert "gState" not in written_regs
+        assert "TxCpltCallback" not in written_regs

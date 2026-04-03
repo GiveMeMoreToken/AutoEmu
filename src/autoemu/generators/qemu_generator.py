@@ -262,6 +262,7 @@ def _generate_source(peripheral: Peripheral) -> str:
     n_irq = 0
     if peripheral.interrupt_model:
         n_irq = len(peripheral.interrupt_model.lines)
+    register_names = {reg.name for reg in peripheral.register_block.registers}
 
     lines.append(f"static void stm32_{snake}_update_irq({type_name} *s)")
     lines.append(f"{{")
@@ -270,12 +271,17 @@ def _generate_source(peripheral: Peripheral) -> str:
             if irq_line.flags:
                 conditions = []
                 for flag in irq_line.flags:
+                    if not flag.register_name or flag.register_name not in register_names:
+                        continue
                     sr = flag.register_name.lower()
-                    er = flag.enable_register.lower()
-                    conditions.append(
-                        f"(s->{sr} & (1U << {flag.bit_offset})) && "
-                        f"(s->{er} & (1U << {flag.enable_bit_offset}))"
-                    )
+                    if flag.enable_register and flag.enable_register in register_names:
+                        er = flag.enable_register.lower()
+                        conditions.append(
+                            f"(s->{sr} & (1U << {flag.bit_offset})) && "
+                            f"(s->{er} & (1U << {flag.enable_bit_offset}))"
+                        )
+                    else:
+                        conditions.append(f"(s->{sr} & (1U << {flag.bit_offset}))")
                 if conditions:
                     cond_str = " ||\n            ".join(conditions)
                     lines.append(f"    int level_{i} = ({cond_str}) ? 1 : 0;")

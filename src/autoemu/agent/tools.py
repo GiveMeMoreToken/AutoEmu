@@ -14,11 +14,18 @@ from typing import Any
 from autoemu.agent.backend import ToolSpec
 from autoemu.parsers.svd_parser import parse_svd_file, parse_svd_string
 from autoemu.parsers.header_parser import parse_header_file
+from autoemu.parsers.register_extractor import extract_register_blocks
 from autoemu.parsers.driver_parser import (
     analyze_driver_file,
     analyze_driver_string,
     DriverAnalysis,
 )
+from autoemu.fetchers.stm32 import STM32DataFetcher
+from autoemu.generators.bundle_generator import generate_model_bundle
+from autoemu.inference.dependency_inference import infer_dependency_graph
+from autoemu.inference.interrupt_inference import infer_interrupt_model
+from autoemu.inference.state_machine_inference import infer_state_machine
+from autoemu.pipeline import run_model_pipeline
 from autoemu.models import (
     RegisterBlock,
     Peripheral,
@@ -117,6 +124,20 @@ async def _parse_header(args: dict[str, Any]) -> dict[str, Any]:
         return _err(f"Header parse failed: {e}")
 
 
+async def _extract_register_structure(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        periph = args.get("peripheral_name") or None
+        blocks = extract_register_blocks(
+            svd_path=args.get("svd_path", ""),
+            header_path=args.get("header_path", ""),
+            peripheral_name=periph,
+        )
+        result = {name: blk.model_dump() for name, blk in blocks.items()}
+        return _ok(json.dumps(result, indent=2))
+    except Exception as e:
+        return _err(f"Register extraction failed: {e}")
+
+
 async def _analyze_driver(args: dict[str, Any]) -> dict[str, Any]:
     try:
         analysis = analyze_driver_file(
@@ -137,6 +158,71 @@ async def _analyze_driver_text(args: dict[str, Any]) -> dict[str, Any]:
         return _ok(_format_driver_analysis(analysis))
     except Exception as e:
         return _err(f"Driver text analysis failed: {e}")
+
+
+async def _infer_state_machine(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        analysis_data = json.loads(args["driver_analysis_json"])
+        documentation_text = args.get("documentation_text", "")
+        sm = infer_state_machine(
+            analysis_data,
+            documentation_text=documentation_text,
+        )
+        result = {
+            "model": sm.model_dump(),
+            "dot": sm.to_dot(),
+            "states": [state.name for state in sm.states],
+            "transitions": len(sm.transitions),
+        }
+        return _ok(json.dumps(result, indent=2))
+    except Exception as e:
+        return _err(f"State machine inference failed: {e}")
+
+
+async def _infer_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        analysis_data = json.loads(args["driver_analysis_json"])
+        register_blocks_data = json.loads(args.get("register_blocks_json", "{}"))
+        peripheral_name = args.get("peripheral_name", "")
+        model = infer_interrupt_model(
+            analysis_data,
+            register_blocks_data,
+            peripheral_name=peripheral_name,
+        )
+        result = {
+            "model": model.model_dump(),
+            "lines": len(model.lines),
+            "event_sources": model.event_sources,
+        }
+        return _ok(json.dumps(result, indent=2))
+    except Exception as e:
+        return _err(f"Interrupt model inference failed: {e}")
+
+
+async def _infer_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        analysis_data = json.loads(args["driver_analysis_json"])
+        documentation_text = args.get("documentation_text", "")
+        interrupt_model_data = json.loads(args.get("interrupt_model_json", "null"))
+        peripheral_name = args.get("peripheral_name", "")
+        mcu_name = args.get("mcu_name", "")
+
+        model = infer_dependency_graph(
+            analysis_data,
+            peripheral_name=peripheral_name,
+            documentation_text=documentation_text,
+            interrupt_model=interrupt_model_data,
+            mcu_name=mcu_name,
+        )
+        result = {
+            "model": model.model_dump(),
+            "dot": model.to_dot(),
+            "edges": len(model.edges),
+            "peripherals": sorted(model.get_all_peripherals()),
+        }
+        return _ok(json.dumps(result, indent=2))
+    except Exception as e:
+        return _err(f"Dependency graph inference failed: {e}")
 
 
 async def _build_peripheral_model(args: dict[str, Any]) -> dict[str, Any]:
@@ -213,6 +299,53 @@ async def _build_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
         return _ok(json.dumps(result, indent=2))
     except Exception as e:
         return _err(f"Dependency graph build failed: {e}")
+
+
+async def _generate_model_bundle(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        register_blocks_data = json.loads(args["register_blocks_json"])
+        state_machine_data = json.loads(args.get("state_machine_json", "null"))
+        interrupt_model_data = json.loads(args.get("interrupt_model_json", "null"))
+        dependency_graph_data = json.loads(args.get("dependency_graph_json", "null"))
+        driver_analysis_data = json.loads(args.get("driver_analysis_json", "null"))
+
+        result = generate_model_bundle(
+            args["peripheral_name"],
+            register_blocks_data,
+            output_dir=args.get("output_dir", "output"),
+            peripheral_type=args.get("peripheral_type") or None,
+            state_machine=state_machine_data,
+            interrupt_model=interrupt_model_data,
+            dependencies=dependency_graph_data,
+            driver_analysis=driver_analysis_data,
+            mcu_family=args.get("mcu_family", ""),
+        )
+        summary = {
+            "peripheral_json": result["peripheral_json"],
+            "generated_files": result["generated_files"],
+            "validation_report": result["validation_report"],
+        }
+        return _ok(json.dumps(summary, indent=2))
+    except Exception as e:
+        return _err(f"Model bundle generation failed: {e}")
+
+
+async def _run_model_pipeline(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        driver_paths = json.loads(args.get("driver_paths_json", "[]"))
+        docs_paths = json.loads(args.get("docs_paths_json", "[]"))
+        result = run_model_pipeline(
+            args["peripheral_name"],
+            output_dir=args.get("output_dir", "output"),
+            svd_path=args.get("svd_path", ""),
+            header_path=args.get("header_path", ""),
+            driver_paths=driver_paths,
+            documentation_paths=docs_paths,
+            mcu_family=args.get("mcu_family", ""),
+        )
+        return _ok(json.dumps(result, indent=2))
+    except Exception as e:
+        return _err(f"Model pipeline failed: {e}")
 
 
 async def _generate_qemu_peripheral(args: dict[str, Any]) -> dict[str, Any]:
@@ -319,6 +452,30 @@ async def _write_file(args: dict[str, Any]) -> dict[str, Any]:
         return _err(f"File write failed: {e}")
 
 
+async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        target_mcu = args["target_mcu"]
+        target_peripheral = args["target_peripheral"]
+        output_dir = args.get("output_dir", "data/stm32")
+        refresh = bool(args.get("refresh", False))
+
+        fetcher = STM32DataFetcher()
+        result = fetcher.fetch_data(
+            target_mcu=target_mcu,
+            target_peripheral=target_peripheral,
+            output_dir=output_dir,
+            refresh=refresh,
+        )
+
+        lines = [
+            f"Fetched STM32 input data for {target_mcu} / {target_peripheral}",
+        ]
+        lines.extend(result.summary_lines())
+        return _ok("\n".join(lines))
+    except Exception as e:
+        return _err(f"STM32 data fetch failed: {e}")
+
+
 # ------------------------------------------------------------------ registry
 
 ALL_TOOLS: list[ToolSpec] = [
@@ -350,6 +507,15 @@ ALL_TOOLS: list[ToolSpec] = [
         handler=_parse_header,
     ),
     ToolSpec(
+        name="extract_register_structure",
+        description=(
+            "Build a peripheral register structure by combining SVD and header inputs. "
+            "Prefers SVD field semantics but fills gaps from CMSIS header layout and access qualifiers."
+        ),
+        parameters={"svd_path": str, "header_path": str, "peripheral_name": str},
+        handler=_extract_register_structure,
+    ),
+    ToolSpec(
         name="analyze_driver",
         description=(
             "Analyze a HAL/LL driver C source file for register access patterns, "
@@ -363,6 +529,39 @@ ALL_TOOLS: list[ToolSpec] = [
         description="Analyze HAL/LL driver source code from a text string.",
         parameters={"source_code": str, "peripheral_name": str},
         handler=_analyze_driver_text,
+    ),
+    ToolSpec(
+        name="infer_state_machine",
+        description=(
+            "Infer a peripheral state machine from driver analysis JSON and optional "
+            "documentation text. Returns state-machine JSON and Graphviz DOT."
+        ),
+        parameters={"driver_analysis_json": str, "documentation_text": str},
+        handler=_infer_state_machine,
+    ),
+    ToolSpec(
+        name="infer_interrupt_model",
+        description=(
+            "Infer an interrupt model from driver analysis JSON and extracted register "
+            "blocks JSON. Returns interrupt-model JSON with event mappings."
+        ),
+        parameters={"driver_analysis_json": str, "register_blocks_json": str, "peripheral_name": str},
+        handler=_infer_interrupt_model,
+    ),
+    ToolSpec(
+        name="infer_dependency_graph",
+        description=(
+            "Infer a cross-peripheral dependency graph from driver analysis JSON, "
+            "optional documentation text, and an optional interrupt model JSON."
+        ),
+        parameters={
+            "driver_analysis_json": str,
+            "documentation_text": str,
+            "interrupt_model_json": str,
+            "peripheral_name": str,
+            "mcu_name": str,
+        },
+        handler=_infer_dependency_graph,
     ),
     ToolSpec(
         name="build_peripheral_model",
@@ -401,6 +600,43 @@ ALL_TOOLS: list[ToolSpec] = [
         ),
         parameters={"mcu_name": str, "edges_json": str},
         handler=_build_dependency_graph,
+    ),
+    ToolSpec(
+        name="generate_model_bundle",
+        description=(
+            "Assemble a peripheral model from step outputs, generate QEMU and harness "
+            "artifacts, and emit a validation report."
+        ),
+        parameters={
+            "peripheral_name": str,
+            "register_blocks_json": str,
+            "state_machine_json": str,
+            "interrupt_model_json": str,
+            "dependency_graph_json": str,
+            "driver_analysis_json": str,
+            "output_dir": str,
+            "peripheral_type": str,
+            "mcu_family": str,
+        },
+        handler=_generate_model_bundle,
+    ),
+    ToolSpec(
+        name="run_model_pipeline",
+        description=(
+            "Run the full deterministic pipeline from register inputs and driver files: "
+            "extract registers, infer behavior, infer interrupts, infer dependencies, "
+            "generate QEMU artifacts, and emit validation results."
+        ),
+        parameters={
+            "peripheral_name": str,
+            "svd_path": str,
+            "header_path": str,
+            "driver_paths_json": str,
+            "docs_paths_json": str,
+            "output_dir": str,
+            "mcu_family": str,
+        },
+        handler=_run_model_pipeline,
     ),
     ToolSpec(
         name="generate_qemu_peripheral",
@@ -455,6 +691,17 @@ ALL_TOOLS: list[ToolSpec] = [
         description="Write content to a file, creating parent directories if needed.",
         parameters={"file_path": str, "content": str},
         handler=_write_file,
+    ),
+    ToolSpec(
+        name="fetch_data",
+        description=(
+            "Fetch STM32 input data for one MCU/peripheral target. "
+            "Uses web search plus trusted fallbacks to collect manuals, datasheets, "
+            "SVDs, headers, HAL/LL drivers, and RTOS adaptation sources. "
+            "Writes manifests under the output directory."
+        ),
+        parameters={"target_mcu": str, "target_peripheral": str, "output_dir": str, "refresh": bool},
+        handler=_fetch_data,
     ),
 ]
 

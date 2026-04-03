@@ -1,0 +1,8 @@
+config AUTOEMU_VIRT_PROBES
+	bool "AutoEmu virtual peripheral probes"
+	depends on OF && HAS_IOMEM
+	default n
+	help
+	  Built-in probe drivers used by the AutoEmu STM32 Linux validation board.
+	  They exercise the virtual ETH, USB OTG FS, and SUBGHZ peripherals during
+	  guest boot and print probe results to the kernel log.

@@ -22,6 +22,12 @@ _SVD_ACCESS_MAP: dict[str, AccessType] = {
     "read-writeOnce": AccessType.RW,
 }
 
+_SVD_MODIFIED_WRITE_MAP: dict[str, AccessType] = {
+    "oneToClear": AccessType.W1C,
+    "oneToSet": AccessType.W1S,
+    "zeroToClear": AccessType.W0C,
+}
+
 
 def _text(element: etree._Element, tag: str, default: str = "") -> str:
     child = element.find(tag)
@@ -44,7 +50,20 @@ def _parse_access(
     element: etree._Element, parent_access: AccessType = AccessType.RW
 ) -> AccessType:
     text = _text(element, "access")
-    return _SVD_ACCESS_MAP.get(text, parent_access)
+    access = _SVD_ACCESS_MAP.get(text, parent_access)
+    modified_write = _text(element, "modifiedWriteValues")
+    if modified_write in _SVD_MODIFIED_WRITE_MAP:
+        access = _SVD_MODIFIED_WRITE_MAP[modified_write]
+
+    read_action = _text(element, "readAction")
+    if read_action == "clear":
+        if access == AccessType.W1C:
+            return AccessType.RC_W1
+        if access == AccessType.W0C:
+            return AccessType.RC_W0
+    if read_action == "set":
+        return AccessType.RS
+    return access
 
 
 def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField:

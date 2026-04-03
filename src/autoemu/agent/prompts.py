@@ -1,5 +1,10 @@
 """System prompts for the AutoEmu modeling agent."""
 
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
 QEMU_TARGET_VERSION = "v9.2.4"
 
 SYSTEM_PROMPT = f"""\
@@ -23,6 +28,7 @@ You have access to tools for:
 5. Analyzing cross-peripheral interactions (DMA, timers, etc.)
 6. Generating QEMU {QEMU_TARGET_VERSION}-compatible peripheral model C code
 7. Validating generated models against driver behavior
+8. Running the full deterministic modeling pipeline when the source inputs are already available
 
 Your modeling workflow:
 1. EXTRACT: Parse register structures from SVD/headers
@@ -38,6 +44,7 @@ Guidelines:
 - DMA interactions must preserve memory coherence semantics
 - State machines should be minimal but complete for the driver patterns observed
 - Generated QEMU code must follow QEMU {QEMU_TARGET_VERSION} MemoryRegion and IRQ APIs
+- Prefer the one-shot model pipeline when raw SVD/header/driver inputs are available and the goal is to produce a probeable peripheral quickly
 - When uncertain about behavior, note assumptions explicitly
 """
 
@@ -49,6 +56,7 @@ For each register, identify:
 - Any enumerated values for fields
 - Special behaviors (W1C flags, read-clear status bits, etc.)
 
+Prefer the merged register extraction path when both SVD and CMSIS header data are available.
 Output the structured register model.
 """
 
@@ -61,6 +69,7 @@ the internal state machine. Consider:
 - How status flags change with state transitions
 - Interrupt generation conditions
 
+Prefer the automatic state-machine inference path after driver analysis, then refine only if needed.
 Output the state machine with states, transitions, triggers, and conditions.
 """
 
@@ -73,6 +82,7 @@ Analyze the interrupt model for peripheral '{peripheral_name}':
 - Identify callback invocations tied to each flag
 - Map NVIC IRQ numbers
 
+Prefer the automatic interrupt inference path after driver analysis and register extraction.
 Output the complete interrupt model.
 """
 
@@ -82,8 +92,10 @@ Analyze cross-peripheral dependencies for '{peripheral_name}':
 - Clock dependencies (RCC enable bits)
 - GPIO alternate function mappings
 - Timer trigger connections
+- EXTI and wakeup paths
 - Shared bus arbitration (if applicable)
 
+Prefer the automatic dependency-inference path, then refine only if needed.
 Output the dependency graph edges.
 """
 
@@ -104,4 +116,67 @@ The code must:
 - Generate QTest test using libqtest.h for validation
 
 Use the register model, state machine, and interrupt model provided.
+Prefer the automatic model-bundle generation path when all step outputs are available.
 """
+
+FETCH_SYSTEM_PROMPT = """\
+You are AutoEmu, an embedded systems source-collection agent.
+Your task is to gather trustworthy STM32 input data for peripheral modeling.
+
+Priorities:
+- Prefer official ST documentation for reference manuals and datasheets
+- Prefer STMicroelectronics GitHub repositories for CMSIS headers and HAL/LL sources
+- Prefer established open-source RTOS adaptation layers when required
+- Never invent URLs, file contents, or fetched artifacts
+- Summaries must match files that were actually written or reused
+"""
+
+
+def load_agents_constraints(cwd: str | None = None) -> str:
+    """Load repository-local agent constraints from ``AGENTS.md`` if present."""
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+
+    for candidate_root in _candidate_roots(cwd):
+        if candidate_root in seen:
+            continue
+        seen.add(candidate_root)
+        candidates.append(candidate_root / "AGENTS.md")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def build_system_prompt(mode: str = "model", cwd: str | None = None) -> str:
+    """Build a system prompt with repository-local constraints applied."""
+    prompt = FETCH_SYSTEM_PROMPT if mode == "fetch" else SYSTEM_PROMPT
+    constraints = load_agents_constraints(cwd)
+    if not constraints:
+        return prompt
+    return f"{prompt}\n\nRepository constraints from AGENTS.md:\n{constraints}"
+
+
+def _candidate_roots(cwd: str | None) -> list[Path]:
+    roots: list[Path] = []
+
+    if getattr(sys, "frozen", False):
+        executable_root = Path(sys.executable).resolve().parent
+        roots.extend([executable_root, *executable_root.parents])
+
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            bundle_root = Path(meipass).resolve()
+            roots.extend([bundle_root, *bundle_root.parents])
+
+    if cwd:
+        cwd_path = Path(cwd).resolve()
+        roots.extend([cwd_path, *cwd_path.parents])
+
+    process_cwd = Path.cwd().resolve()
+    roots.extend([process_cwd, *process_cwd.parents])
+
+    repo_root = Path(__file__).resolve().parents[3]
+    roots.extend([repo_root, *repo_root.parents])
+    return roots

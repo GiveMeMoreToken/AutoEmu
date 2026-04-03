@@ -160,6 +160,26 @@ class TestQEMUGenerator:
             assert "test_test_periph_reset" in content
             assert QEMU_TARGET_VERSION in content
 
+    def test_source_handles_interrupt_flags_without_enable_register(self):
+        periph = _make_test_peripheral()
+        periph.interrupt_model.lines[0].flags.append(
+            InterruptFlag(
+                name="WAKEUP",
+                register_name="SR",
+                bit_offset=1,
+                clear_behavior=FlagBehavior.SOFTWARE_CLEAR,
+                enable_register="",
+                enable_bit_offset=0,
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_peripheral_code(periph, tmpdir)
+            source = [f for f in files if Path(f).name == "stm32_test_periph.c"][0]
+            content = Path(source).read_text()
+
+            assert "(s->sr & (1U << 1))" in content
+            assert "s-> &" not in content
+
 
 class TestTestGenerator:
     def test_generates_test_file(self):
