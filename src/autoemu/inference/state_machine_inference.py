@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from autoemu.modeling_utils import normalize_driver_analysis
@@ -17,6 +18,24 @@ def infer_state_machine(
     documentation_text: str = "",
 ) -> StateMachine:
     """Infer a state machine from driver analysis and optional documentation text."""
+    try:
+        return _infer_state_machine_impl(driver_analysis, documentation_text=documentation_text)
+    except Exception as exc:
+        print(f"[autoemu] warning: state_machine inference failed: {exc}", file=sys.stderr)
+        return StateMachine(
+            name="PERIPHERAL_behavior",
+            description="Fallback single-state machine after inference failure",
+            states=[State(name="reset", is_initial=True, description="Hardware reset state")],
+            transitions=[],
+        )
+
+
+def _infer_state_machine_impl(
+    driver_analysis: DriverAnalysis | dict[str, Any],
+    *,
+    documentation_text: str = "",
+) -> StateMachine:
+    """Core implementation of state machine inference."""
     analysis = normalize_driver_analysis(driver_analysis)
     peripheral_name = analysis.get("peripheral_name", "PERIPHERAL") or "PERIPHERAL"
     register_accesses = analysis.get("register_accesses", [])

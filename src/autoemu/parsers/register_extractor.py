@@ -6,12 +6,15 @@ modeling pipeline can consume a better peripheral register model directly.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import re
 
 from autoemu.models.register import Register, RegisterBlock
 from autoemu.parsers.header_parser import parse_header_file
-from autoemu.parsers.svd_parser import parse_svd_file
+from autoemu.parsers.svd_parser import parse_svd_file, svd_warnings
+
+logger = logging.getLogger(__name__)
 
 
 def extract_register_blocks(
@@ -19,9 +22,18 @@ def extract_register_blocks(
     svd_path: str | Path = "",
     header_path: str | Path = "",
     peripheral_name: str | None = None,
-) -> dict[str, RegisterBlock]:
-    """Extract and merge register blocks from SVD and header inputs."""
+) -> tuple[dict[str, RegisterBlock], list[str]]:
+    """Extract and merge register blocks from SVD and header inputs.
+
+    Returns a tuple of ``(blocks, warnings)`` where *warnings* is a list of
+    human-readable warning messages accumulated during parsing.
+    """
+    warnings: list[str] = []
+
     svd_blocks = parse_svd_file(svd_path) if svd_path else {}
+    # Collect SVD-level warnings
+    warnings.extend(svd_warnings)
+
     header_blocks = parse_header_file(header_path) if header_path else {}
 
     if peripheral_name:
@@ -31,6 +43,11 @@ def extract_register_blocks(
         )
     else:
         names = sorted(set(svd_blocks) | set(header_blocks))
+
+    if peripheral_name and not names:
+        warnings.append(
+            f"Peripheral '{peripheral_name}' not found in any input source."
+        )
 
     results: dict[str, RegisterBlock] = {}
     for name in names:
@@ -42,7 +59,7 @@ def extract_register_blocks(
             results[name] = svd_block
         elif header_block:
             results[name] = header_block
-    return results
+    return results, warnings
 
 
 def merge_register_blocks(primary: RegisterBlock, secondary: RegisterBlock) -> RegisterBlock:

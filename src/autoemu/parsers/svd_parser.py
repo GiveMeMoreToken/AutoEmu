@@ -6,12 +6,18 @@ bit field definitions, and access types.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from lxml import etree
 
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
+
+logger = logging.getLogger(__name__)
+
+#: Module-level warnings accumulated during parsing.
+svd_warnings: list[str] = []
 
 
 _SVD_ACCESS_MAP: dict[str, AccessType] = {
@@ -66,8 +72,12 @@ def _parse_access(
     return access
 
 
-def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField:
-    """Parse a single SVD field element."""
+def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField | None:
+    """Parse a single SVD field element.
+
+    Returns ``None`` when the field has an invalid width (0 or negative) so
+    the caller can skip it with a warning.
+    """
     name = _text(field_elem, "name")
     description = _text(field_elem, "description")
     bit_offset = _int(field_elem, "bitOffset", -1)
@@ -86,6 +96,13 @@ def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField:
             msb = _int(field_elem, "msb", 0)
             bit_offset = lsb
             bit_width = msb - lsb + 1
+
+    # Skip fields with non-standard (invalid) widths
+    if bit_width <= 0:
+        msg = f"Skipping field '{name}': invalid bitWidth {bit_width}"
+        logger.warning(msg)
+        svd_warnings.append(msg)
+        return None
 
     access = _parse_access(field_elem, reg_access)
 
@@ -109,20 +126,42 @@ def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField:
     )
 
 
-def parse_register(reg_elem: etree._Element, periph_access: AccessType) -> Register:
+def _inherit_reset_value(
+    reg_elem: etree._Element, periph_elem: etree._Element | None
+) -> int:
+    """Resolve a register's reset value, inheriting from peripheral level if missing."""
+    rv_text = _text(reg_elem, "resetValue")
+    if rv_text:
+        return _int(reg_elem, "resetValue")
+    # Fall back to the peripheral-level resetValue if present
+    if periph_elem is not None:
+        periph_rv = _text(periph_elem, "resetValue")
+        if periph_rv:
+            return _int(periph_elem, "resetValue")
+    # Default to 0x0
+    return 0
+
+
+def parse_register(
+    reg_elem: etree._Element,
+    periph_access: AccessType,
+    periph_elem: etree._Element | None = None,
+) -> Register:
     """Parse a single SVD register element."""
     name = _text(reg_elem, "name")
     description = _text(reg_elem, "description")
     offset = _int(reg_elem, "addressOffset")
     size = _int(reg_elem, "size", 32)
-    reset_value = _int(reg_elem, "resetValue")
+    reset_value = _inherit_reset_value(reg_elem, periph_elem)
     access = _parse_access(reg_elem, periph_access)
 
     fields: list[BitField] = []
     fields_elem = reg_elem.find("fields")
     if fields_elem is not None:
         for field_elem in fields_elem.findall("field"):
-            fields.append(parse_field(field_elem, access))
+            parsed = parse_field(field_elem, access)
+            if parsed is not None:
+                fields.append(parsed)
 
     # Set per-field reset values from register reset value
     for f in fields:
@@ -178,19 +217,19 @@ def parse_peripheral(periph_elem: etree._Element) -> RegisterBlock:
                     indices = [str(i) for i in range(dim)]
 
                 for i, idx in enumerate(indices):
-                    reg = parse_register(reg_elem, access)
+                    reg = parse_register(reg_elem, access, periph_elem)
                     reg.name = base_name.replace("%s", idx)
                     reg.offset = base_offset + i * dim_increment
                     registers.append(reg)
             else:
-                registers.append(parse_register(reg_elem, access))
+                registers.append(parse_register(reg_elem, access, periph_elem))
 
         # Handle clusters
         for cluster_elem in regs_elem.findall("cluster"):
             cluster_name = _text(cluster_elem, "name")
             cluster_offset = _int(cluster_elem, "addressOffset")
             for reg_elem in cluster_elem.findall("register"):
-                reg = parse_register(reg_elem, access)
+                reg = parse_register(reg_elem, access, periph_elem)
                 reg.name = f"{cluster_name}_{reg.name}"
                 reg.offset += cluster_offset
                 registers.append(reg)
@@ -203,20 +242,59 @@ def parse_peripheral(periph_elem: etree._Element) -> RegisterBlock:
     )
 
 
-def parse_svd_file(path: str | Path) -> dict[str, RegisterBlock]:
-    """Parse an SVD file and return a dict of peripheral name -> RegisterBlock."""
-    tree = etree.parse(str(path))
-    root = tree.getroot()
+def _topological_sort_peripherals(
+    periph_elements: list[etree._Element],
+) -> list[etree._Element]:
+    """Sort peripheral elements so that derivedFrom bases come before dependents.
 
-    # Collect all peripheral elements
-    periph_elements: list[etree._Element] = root.findall(".//peripheral")
+    Non-derived peripherals come first; derived peripherals are topologically
+    sorted so that transitive chains (A derives B derives C) are resolved in
+    the correct order.
+    """
+    by_name: dict[str, etree._Element] = {}
+    for elem in periph_elements:
+        name = _text(elem, "name")
+        if name:
+            by_name[name] = elem
 
-    # Sort: non-derived first, then derived (so base peripherals are available)
     non_derived = [e for e in periph_elements if not e.get("derivedFrom")]
     derived = [e for e in periph_elements if e.get("derivedFrom")]
 
+    # Build adjacency: derived_name -> base_name
+    deps: dict[str, str] = {}
+    for e in derived:
+        name = _text(e, "name")
+        base = e.get("derivedFrom", "")
+        if name and base:
+            deps[name] = base
+
+    # Topological sort via DFS
+    visited: set[str] = set()
+    order: list[str] = []
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        base = deps.get(name)
+        if base and base in deps:
+            visit(base)
+        order.append(name)
+
+    for name in deps:
+        visit(name)
+
+    derived_sorted = [by_name[n] for n in order if n in by_name]
+    return non_derived + derived_sorted
+
+
+def _parse_peripherals_from_root(root: etree._Element) -> dict[str, RegisterBlock]:
+    """Core logic shared by ``parse_svd_file`` and ``parse_svd_string``."""
+    periph_elements: list[etree._Element] = root.findall(".//peripheral")
+    sorted_elements = _topological_sort_peripherals(periph_elements)
+
     results: dict[str, RegisterBlock] = {}
-    for periph_elem in non_derived + derived:
+    for periph_elem in sorted_elements:
         name = _text(periph_elem, "name")
         if not name:
             continue
@@ -232,34 +310,44 @@ def parse_svd_file(path: str | Path) -> dict[str, RegisterBlock]:
                 base.description = desc
             results[name] = base
         else:
-            results[name] = parse_peripheral(periph_elem)
+            try:
+                results[name] = parse_peripheral(periph_elem)
+            except Exception as exc:
+                msg = f"Failed to parse peripheral '{name}': {exc}"
+                logger.warning(msg)
+                svd_warnings.append(msg)
 
     return results
+
+
+def parse_svd_file(path: str | Path) -> dict[str, RegisterBlock]:
+    """Parse an SVD file and return a dict of peripheral name -> RegisterBlock.
+
+    Returns partial results on parse errors rather than crashing.
+    """
+    svd_warnings.clear()
+    try:
+        tree = etree.parse(str(path))
+        root = tree.getroot()
+        return _parse_peripherals_from_root(root)
+    except Exception as exc:
+        msg = f"SVD parse error for '{path}': {exc}"
+        logger.warning(msg)
+        svd_warnings.append(msg)
+        return {}
 
 
 def parse_svd_string(xml_content: str) -> dict[str, RegisterBlock]:
-    """Parse SVD XML content from a string."""
-    root = etree.fromstring(xml_content.encode())
+    """Parse SVD XML content from a string.
 
-    # Collect all peripheral elements
-    periph_elements: list[etree._Element] = root.findall(".//peripheral")
-
-    # Sort: non-derived first, then derived (so base peripherals are available)
-    non_derived = [e for e in periph_elements if not e.get("derivedFrom")]
-    derived = [e for e in periph_elements if e.get("derivedFrom")]
-
-    results: dict[str, RegisterBlock] = {}
-    for periph_elem in non_derived + derived:
-        name = _text(periph_elem, "name")
-        if not name:
-            continue
-        derived_from = periph_elem.get("derivedFrom")
-        if derived_from and derived_from in results:
-            base = results[derived_from].model_copy(deep=True)
-            base.name = name
-            base.base_address = _int(periph_elem, "baseAddress", base.base_address)
-            results[name] = base
-        else:
-            results[name] = parse_peripheral(periph_elem)
-
-    return results
+    Returns partial results on parse errors rather than crashing.
+    """
+    svd_warnings.clear()
+    try:
+        root = etree.fromstring(xml_content.encode())
+        return _parse_peripherals_from_root(root)
+    except Exception as exc:
+        msg = f"SVD string parse error: {exc}"
+        logger.warning(msg)
+        svd_warnings.append(msg)
+        return {}

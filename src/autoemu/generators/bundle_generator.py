@@ -24,6 +24,7 @@ from autoemu.models.register import BitField, Register, RegisterBlock
 from autoemu.models.state_machine import StateMachine
 from autoemu.parsers.driver_parser import DriverAnalysis, RegisterAccess, analyze_driver_file
 from autoemu.validators.behavior_validator import validate_behavior
+from autoemu.validators.compile_validator import validate_compile
 from autoemu.validators.register_validator import validate_register_block
 
 
@@ -230,7 +231,12 @@ def generate_model_bundle(
     generated_files.extend(generate_peripheral_code(peripheral, output_path))
     generated_files.extend(generate_test_harness(peripheral, output_path))
 
+    compile_result = validate_compile(
+        [f for f in generated_files if f.endswith(('.c', '.h'))],
+    )
+
     validation_report = verify_peripheral_consistency(peripheral, driver_analysis)
+    validation_report["compile_validation"] = compile_result
     validation_path = output_path / f"{snake}_validation.json"
     validation_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")
     generated_files.append(str(validation_path))

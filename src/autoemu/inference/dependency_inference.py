@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import sys
 from typing import Any, Iterable
 
 from autoemu.modeling_utils import (
@@ -33,6 +34,34 @@ def infer_dependency_graph(
     mcu_name: str = "",
 ) -> DependencyGraph:
     """Infer a dependency graph from driver analysis, source code, and docs."""
+    try:
+        if driver_analyses is None:
+            return DependencyGraph(mcu_name=mcu_name or peripheral_name, edges=[])
+        if isinstance(driver_analyses, list) and len(driver_analyses) == 0:
+            return DependencyGraph(mcu_name=mcu_name or peripheral_name, edges=[])
+        return _infer_dependency_graph_impl(
+            driver_analyses,
+            peripheral_name=peripheral_name,
+            documentation_text=documentation_text,
+            interrupt_model=interrupt_model,
+            source_texts=source_texts,
+            mcu_name=mcu_name,
+        )
+    except Exception as exc:
+        print(f"[autoemu] warning: dependency inference failed: {exc}", file=sys.stderr)
+        return DependencyGraph(mcu_name=mcu_name or peripheral_name, edges=[])
+
+
+def _infer_dependency_graph_impl(
+    driver_analyses: DriverAnalysis | dict[str, Any] | list[DriverAnalysis | dict[str, Any]],
+    *,
+    peripheral_name: str = "",
+    documentation_text: str = "",
+    interrupt_model: InterruptModel | dict[str, Any] | None = None,
+    source_texts: list[str] | None = None,
+    mcu_name: str = "",
+) -> DependencyGraph:
+    """Core implementation of dependency graph inference."""
     analyses = _normalize_driver_analyses(driver_analyses)
     periph = peripheral_name or next(
         (analysis.get("peripheral_name", "") for analysis in analyses if analysis.get("peripheral_name")),

@@ -65,10 +65,11 @@ class AutoEmuAgentRuntime:
         target_peripheral: str,
         output_dir: str | Path = "data/stm32",
         refresh: bool = False,
+        offline: bool = False,
     ) -> dict[str, Any]:
         """Fetch source inputs using the configured execution backend."""
         if self.config.backend == "harness":
-            fetcher = STM32DataFetcher()
+            fetcher = STM32DataFetcher(offline=offline)
             result = fetcher.fetch_data(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
@@ -110,6 +111,7 @@ class AutoEmuAgentRuntime:
         target_peripheral: str,
         data_dir: str | Path = "data/stm32",
         output_dir: str | Path = "output",
+        offline: bool = False,
     ) -> dict[str, Any]:
         """Build a QEMU-ready peripheral model using the configured execution backend."""
         if self.config.backend == "harness":

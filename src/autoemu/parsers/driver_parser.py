@@ -9,10 +9,13 @@ Analyzes STM32 HAL and LL driver source code to extract:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -154,25 +157,31 @@ def _looks_like_enable_register(register_name: str) -> bool:
 
 
 def _extract_function_bodies(content: str) -> dict[str, str]:
-    """Extract function name -> function body mappings."""
+    """Extract function name -> function body mappings.
+
+    Wrapped in try/except so malformed C files don't crash the parser.
+    """
     functions: dict[str, str] = {}
-    for m in _RE_FUNC_DEF.finditer(content):
-        func_name = m.group(1)
-        start = m.start()
-        # Find the opening brace
-        brace_pos = content.find("{", start)
-        if brace_pos < 0:
-            continue
-        # Match braces
-        depth = 1
-        pos = brace_pos + 1
-        while pos < len(content) and depth > 0:
-            if content[pos] == "{":
-                depth += 1
-            elif content[pos] == "}":
-                depth -= 1
-            pos += 1
-        functions[func_name] = content[brace_pos:pos]
+    try:
+        for m in _RE_FUNC_DEF.finditer(content):
+            func_name = m.group(1)
+            start = m.start()
+            # Find the opening brace
+            brace_pos = content.find("{", start)
+            if brace_pos < 0:
+                continue
+            # Match braces
+            depth = 1
+            pos = brace_pos + 1
+            while pos < len(content) and depth > 0:
+                if content[pos] == "{":
+                    depth += 1
+                elif content[pos] == "}":
+                    depth -= 1
+                pos += 1
+            functions[func_name] = content[brace_pos:pos]
+    except Exception as exc:
+        logger.warning("Failed to extract function bodies: %s", exc)
     return functions
 
 
@@ -321,8 +330,19 @@ def _extract_dma_configs(body: str, peripheral: str) -> list[DMAConfig]:
 
 
 def analyze_driver_file(path: str | Path, peripheral_name: str = "") -> DriverAnalysis:
-    """Analyze a HAL/LL driver source file."""
-    content = Path(path).read_text(encoding="utf-8", errors="replace")
+    """Analyze a HAL/LL driver source file.
+
+    Never raises: returns an empty analysis on read or parse failure.
+    """
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.warning("Failed to read driver file '%s': %s", path, exc)
+        return DriverAnalysis(
+            peripheral_name=peripheral_name or "UNKNOWN",
+            source_file=str(path),
+        )
+
     source_file = str(Path(path).name)
 
     if not peripheral_name:
@@ -359,6 +379,37 @@ def analyze_driver_file(path: str | Path, peripheral_name: str = "") -> DriverAn
         analysis.dma_configs.extend(dma_cfgs)
 
     return analysis
+
+
+def analyze_driver_files(
+    paths: Iterable[str | Path], peripheral_name: str = ""
+) -> DriverAnalysis:
+    """Analyze multiple driver source files and merge into a single analysis.
+
+    This is a parser-level convenience for drivers split across multiple files.
+    Each file is analyzed independently and the results are merged.
+    """
+    analyses = [analyze_driver_file(p, peripheral_name) for p in paths]
+    if not analyses:
+        return DriverAnalysis(
+            peripheral_name=peripheral_name or "UNKNOWN",
+            source_file="",
+        )
+
+    effective_name = peripheral_name or analyses[0].peripheral_name
+    merged = DriverAnalysis(
+        peripheral_name=effective_name,
+        source_file=";".join(
+            _unique_in_order([a.source_file for a in analyses if a.source_file])
+        ),
+    )
+    for a in analyses:
+        merged.register_accesses.extend(a.register_accesses)
+        merged.isr_patterns.extend(a.isr_patterns)
+        merged.init_sequences.extend(a.init_sequences)
+        merged.dma_configs.extend(a.dma_configs)
+        merged.state_hints.extend(a.state_hints)
+    return merged
 
 
 def analyze_driver_string(content: str, peripheral_name: str = "") -> DriverAnalysis:

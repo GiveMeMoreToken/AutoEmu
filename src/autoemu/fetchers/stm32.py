@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from lxml import html
+
+logger = logging.getLogger(__name__)
 
 
 _USER_AGENT = "AutoEmu/0.1"
@@ -19,6 +24,39 @@ _ST_DOMAINS = ("st.com", "www.st.com", "r.jina.ai")
 _GITHUB_DOMAINS = ("github.com", "raw.githubusercontent.com")
 _DOWNLOAD_TIMEOUT = 10
 _OK_STATUSES = {"downloaded", "cached"}
+
+
+def _urlopen_with_retry(
+    request: Request,
+    *,
+    timeout: int = _DOWNLOAD_TIMEOUT,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+):
+    """Wrap :func:`urlopen` with exponential-backoff retry logic.
+
+    Retries on :class:`URLError`, :class:`TimeoutError`, and general
+    :class:`Exception`.  Returns the response object on success or
+    re-raises the last exception after all retries are exhausted.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return urlopen(request, timeout=timeout)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.debug(
+                    "Retry %d/%d for %s after %.1fs: %s",
+                    attempt + 1,
+                    max_retries,
+                    request.full_url,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
 
 
 @dataclass(frozen=True)
@@ -84,6 +122,7 @@ class FetchResult:
     manifest_path: str = ""
     artifacts: list[ResolvedArtifact] = field(default_factory=list)
     success: bool = False
+    warnings: list[str] = field(default_factory=list)
 
     def to_manifest(self) -> dict[str, object]:
         return {
@@ -93,6 +132,7 @@ class FetchResult:
             "manifest_path": self.manifest_path,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "success": self.success,
+            "warnings": self.warnings,
             "artifacts": [asdict(artifact) for artifact in self.artifacts],
         }
 
@@ -132,7 +172,7 @@ class DuckDuckGoSearcher:
     def search(self, query: str, *, max_results: int = 8) -> list[SearchResult]:
         url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
         request = Request(url, headers={"User-Agent": self.user_agent})
-        with urlopen(request, timeout=10) as response:
+        with _urlopen_with_retry(request, timeout=10) as response:
             doc = html.fromstring(response.read())
 
         results: list[SearchResult] = []
@@ -157,11 +197,13 @@ class STM32DataFetcher:
         user_agent: str = _USER_AGENT,
         max_results_per_query: int = 8,
         enable_fallbacks: bool = True,
+        offline: bool = False,
     ) -> None:
         self.searcher = searcher or DuckDuckGoSearcher(user_agent=user_agent)
         self.user_agent = user_agent
         self.max_results_per_query = max_results_per_query
         self.enable_fallbacks = enable_fallbacks
+        self.offline = offline
         self._repo_listing_cache: dict[tuple[str, str], list[dict[str, str]]] = {}
 
     def fetch_data(
@@ -193,7 +235,46 @@ class STM32DataFetcher:
             output_dir=str(output_root),
             artifacts=artifacts,
         )
-        result.success = _has_register_source(artifacts) and _has_driver_source(artifacts)
+
+        has_registers = _has_register_source(artifacts)
+        has_drivers = _has_driver_source(artifacts)
+
+        if has_registers and has_drivers:
+            result.success = True
+        elif has_registers or has_drivers:
+            result.success = True
+            if not has_registers:
+                result.warnings.append(
+                    "No register source (SVD or header) was fetched; "
+                    "QEMU model generation may be incomplete"
+                )
+                logger.warning("No register source fetched for %s/%s", target_mcu, target_peripheral)
+            if not has_drivers:
+                result.warnings.append(
+                    "No driver source was fetched; "
+                    "behavioral modeling will be limited"
+                )
+                logger.warning("No driver source fetched for %s/%s", target_mcu, target_peripheral)
+        else:
+            result.success = False
+
+        # Log warnings for specific missing optional inputs
+        _category_ok = {a.category for a in artifacts if a.status in _OK_STATUSES}
+        if "svd" not in _category_ok:
+            msg = "SVD file not available; register model will rely on header parsing"
+            if msg not in result.warnings:
+                result.warnings.append(msg)
+                logger.warning(msg)
+        if not any(a.category == "drivers_ll" and a.status in _OK_STATUSES for a in artifacts):
+            msg = "LL driver not available; low-level register semantics may be incomplete"
+            if msg not in result.warnings:
+                result.warnings.append(msg)
+                logger.warning(msg)
+        if not any(a.key == "reference_manual" and a.status in _OK_STATUSES for a in artifacts):
+            msg = "Reference manual not available; documentation-based validation will be skipped"
+            if msg not in result.warnings:
+                result.warnings.append(msg)
+                logger.warning(msg)
 
         manifest_dir = output_root / "manifests"
         manifest_dir.mkdir(parents=True, exist_ok=True)
@@ -305,10 +386,15 @@ class STM32DataFetcher:
             artifact.sha256 = hashlib.sha256(data).hexdigest()
             return artifact
 
+        if self.offline:
+            artifact.status = "error"
+            artifact.error = "Offline mode: file not cached locally"
+            return artifact
+
         download_url = _materialize_download_url(source_url, category)
         try:
             request = Request(download_url, headers={"User-Agent": self.user_agent})
-            with urlopen(request, timeout=_DOWNLOAD_TIMEOUT) as response:
+            with _urlopen_with_retry(request, timeout=_DOWNLOAD_TIMEOUT) as response:
                 data = response.read()
             destination.write_bytes(data)
             artifact.status = "downloaded"
@@ -340,6 +426,10 @@ class STM32DataFetcher:
                 candidates.append((score + 10, normalized_url, "fallback", ""))
 
         if asset.category in {"headers", "drivers_hal", "drivers_ll"} and len(candidates) >= asset.max_matches:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return [(url, resolved_via, query) for _, url, resolved_via, query in candidates]
+
+        if self.offline:
             candidates.sort(key=lambda item: item[0], reverse=True)
             return [(url, resolved_via, query) for _, url, resolved_via, query in candidates]
 
@@ -425,7 +515,7 @@ class STM32DataFetcher:
             url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
             try:
                 request = Request(url, headers=headers)
-                with urlopen(request, timeout=_DOWNLOAD_TIMEOUT) as response:
+                with _urlopen_with_retry(request, timeout=_DOWNLOAD_TIMEOUT) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if isinstance(payload, list):
                     self._repo_listing_cache[cache_key] = payload
@@ -439,7 +529,7 @@ class STM32DataFetcher:
     def _download_text_preview(self, url: str, *, limit: int = 12000) -> str:
         try:
             request = Request(url, headers={"User-Agent": self.user_agent})
-            with urlopen(request, timeout=_DOWNLOAD_TIMEOUT) as response:
+            with _urlopen_with_retry(request, timeout=_DOWNLOAD_TIMEOUT) as response:
                 data = response.read(limit)
             return data.decode("utf-8", errors="ignore")
         except Exception:
@@ -681,6 +771,16 @@ def resolve_fetched_input_bundle(
             category = artifact.get("category", "")
             if not local_path or not Path(local_path).exists():
                 continue
+            # Verify SHA256 integrity when manifest records a hash
+            expected_sha = artifact.get("sha256", "")
+            if expected_sha:
+                actual_sha = hashlib.sha256(Path(local_path).read_bytes()).hexdigest()
+                if actual_sha != expected_sha:
+                    logger.warning(
+                        "SHA256 mismatch for %s: expected %s, got %s — skipping",
+                        local_path, expected_sha[:12], actual_sha[:12],
+                    )
+                    continue
             if category == "docs":
                 docs.append(local_path)
             elif category == "svd":

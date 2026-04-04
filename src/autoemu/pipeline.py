@@ -42,7 +42,7 @@ def run_model_pipeline(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    register_blocks = extract_register_blocks(
+    register_blocks, extraction_warnings = extract_register_blocks(
         svd_path=str(svd_path or ""),
         header_path=str(header_path or ""),
         peripheral_name=peripheral_name,

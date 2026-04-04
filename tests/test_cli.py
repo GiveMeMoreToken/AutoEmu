@@ -27,7 +27,7 @@ def test_fetch_data_command(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    def fake_fetch_data(self, *, target_mcu, target_peripheral, output_dir, refresh):
+    def fake_fetch_data(self, *, target_mcu, target_peripheral, output_dir, refresh, offline=False):
         return {
             "target_mcu": target_mcu,
             "target_peripheral": target_peripheral,

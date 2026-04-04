@@ -21,7 +21,8 @@ def cli():
 @click.option("--target-peripheral", required=True, help="Target peripheral, e.g. ETH, USB, DMA")
 @click.option("--output", "-o", default="data/stm32", help="Output directory")
 @click.option("--refresh", is_flag=True, help="Redownload files even if they already exist")
-def fetch_data_cmd(target_mcu, target_peripheral, output, refresh):
+@click.option("--offline", is_flag=True, help="Only use cached artifacts, skip all network requests")
+def fetch_data_cmd(target_mcu, target_peripheral, output, refresh, offline):
     """Fetch STM32 input data for one MCU/peripheral target."""
     result = _run_cli_action(
         lambda: AutoEmuAgentRuntime().fetch_data(
@@ -29,6 +30,7 @@ def fetch_data_cmd(target_mcu, target_peripheral, output, refresh):
             target_peripheral=target_peripheral,
             output_dir=output,
             refresh=refresh,
+            offline=offline,
         )
     )
     click.echo(json.dumps(result, indent=2))
@@ -39,7 +41,8 @@ def fetch_data_cmd(target_mcu, target_peripheral, output, refresh):
 @click.option("--target-peripheral", required=True, help="Target peripheral, e.g. ETH, USB, DMA")
 @click.option("--data-dir", default="data/stm32", help="Directory containing fetched data")
 @click.option("--output-dir", "-o", default="output", help="Directory for generated artifacts")
-def build_qemu_peripheral_cmd(target_mcu, target_peripheral, data_dir, output_dir):
+@click.option("--offline", is_flag=True, help="Use only cached data, skip network requests")
+def build_qemu_peripheral_cmd(target_mcu, target_peripheral, data_dir, output_dir, offline):
     """Build a QEMU-ready peripheral model from fetched target data."""
     result = _run_cli_action(
         lambda: AutoEmuAgentRuntime().build_qemu_peripheral(
@@ -47,8 +50,24 @@ def build_qemu_peripheral_cmd(target_mcu, target_peripheral, data_dir, output_di
             target_peripheral=target_peripheral,
             data_dir=data_dir,
             output_dir=output_dir,
+            offline=offline,
         )
     )
+    click.echo(json.dumps(result, indent=2))
+
+
+@cli.command(name="validate-compile")
+@click.option("--output-dir", "-o", required=True, help="Directory with generated C/H files")
+@click.option("--qemu-src", default=None, help="Path to QEMU source tree")
+def validate_compile_cmd(output_dir, qemu_src):
+    """Validate that generated C code compiles against QEMU headers."""
+    from autoemu.validators.compile_validator import validate_compile
+    from pathlib import Path
+
+    source_dir = Path(output_dir)
+    files = list(source_dir.glob("*.c")) + list(source_dir.glob("*.h"))
+    qemu_path = Path(qemu_src) if qemu_src else None
+    result = validate_compile(files, qemu_src=qemu_path)
     click.echo(json.dumps(result, indent=2))
 
 

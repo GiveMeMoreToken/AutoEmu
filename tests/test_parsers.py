@@ -273,7 +273,7 @@ typedef struct {
             encoding="utf-8",
         )
 
-        blocks = extract_register_blocks(svd_path=svd, peripheral_name="ETH")
+        blocks, warnings = extract_register_blocks(svd_path=svd, peripheral_name="ETH")
         assert sorted(blocks) == ["Ethernet_DMA", "Ethernet_MAC"]
 
 

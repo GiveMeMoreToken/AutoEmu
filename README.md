@@ -1,18 +1,144 @@
 # AutoEmu
 
-AutoEmu is a harness-first agent framework that fetches STM32 source data, reconstructs peripheral behavior, and emits QEMU-compatible virtual peripherals.
+AutoEmu is a harness-first agent framework that automatically generates QEMU-compatible virtual peripherals for microcontrollers. It fetches STM32 source data (SVD files, CMSIS headers, HAL/LL drivers), reconstructs peripheral behavior through deterministic analysis, and emits production-ready QEMU v9.2.4 C code with validation harnesses.
 
-## CLI
+## Features
 
-The public CLI surface is intentionally small:
+### Data Fetching (`fetch-data`)
+- **Automated source collection** via DuckDuckGo search and GitHub API for SVD, CMSIS headers, HAL/LL/RTOS drivers, and reference manuals
+- **Retry with exponential backoff** on all HTTP requests for reliability
+- **Local cache with SHA256 validation** — skips re-downloading unchanged artifacts
+- **`--offline` mode** — works entirely from cached data without network access
+- **Graceful degradation** — continues pipeline when optional inputs (SVD, LL driver, reference manual) are unavailable
+- **Manifest-based tracking** — every fetch produces a JSON manifest under `data/<platform>/manifests/`
 
-- `fetch-data`
-- `build-qemu-peripheral`
+### Register Parsing
+- **SVD Parser** — lxml-based CMSIS-SVD XML parser with full `derivedFrom` chain resolution (including transitive chains), cluster/array expansion, and non-standard field width handling
+- **Header Parser** — Regex-based CMSIS C header parser extracting `typedef struct` register layouts, `#define` base addresses, and `_Pos`/`_Msk` bit field macros
+- **Driver Parser** — HAL/LL driver code analyzer extracting register access patterns, ISR flag logic, init sequences, DMA configurations, and state hints
+- **Register Extractor** — Merges SVD and header sources into unified register blocks with accumulated warnings (never aborts on partial input)
 
-`fetch-data` prepares the input bundle for one target MCU and peripheral.
-`build-qemu-peripheral` consumes that bundle and generates the peripheral model, QEMU code, tests, and validation output.
+### Behavioral Inference
+- **State Machine Inference** — Automatically constructs FSM models from driver analysis: init/enable/disable transitions, transfer states, ISR-driven completion/error events. Falls back to trivial single-state model for peripherals without clear FSM patterns.
+- **Interrupt Model Inference** — Maps interrupt flags to status/enable registers, infers clear mechanisms (W1C, read-clear, software-clear), resolves NVIC IRQ numbers, and builds event-to-flag maps from ISR patterns.
+- **Dependency Graph Inference** — Detects cross-peripheral dependencies: RCC clock gating, DMA channel assignments, GPIO alternate functions, timer trigger paths, and EXTI wakeup chains.
+- **Hardened inference** — All inference modules return valid-but-empty models on error or insufficient input; they never abort the pipeline.
 
-Both commands run through the same public agent runtime. By default, that runtime uses the local harness backend and deterministic tools. Set `AUTOEMU_AGENT_BACKEND=claude` or `AUTOEMU_AGENT_BACKEND=openai` if you want the same workflow executed through an external LLM agent backend.
+### QEMU Code Generation
+- **Targets QEMU v9.2.4 exclusively** with correct API usage:
+  - `device_class_set_legacy_reset()` (not deprecated `dc->reset`)
+  - `OBJECT_DECLARE_SIMPLE_TYPE` for type declarations
+  - `MemoryRegionOps` for register read/write
+  - Bare field names in `VMSTATE` macros
+  - `hw/qdev-properties.h` for `DeviceClass`
+- **Generated artifacts per peripheral:**
+  - `stm32_<peripheral>.h` — QEMU device header with register offsets and bit field defines
+  - `stm32_<peripheral>.c` — Full QEMU device implementation (MemoryRegionOps, IRQ wiring, VMState, reset)
+  - `meson.build` — Meson build system integration snippet
+  - `qtest_stm32_<peripheral>.c` — QTest harness (reset values, write-read, W1C, read-only protection)
+  - `test_stm32_<peripheral>.c` — Standalone C test harness
+  - `*_model.json` — Complete peripheral model in JSON
+
+### Validation
+- **Register Validator** — Structural checks: overlapping offsets/fields, duplicate names, field width violations, reset value consistency
+- **Behavior Validator** — Cross-validates model against driver analysis: missing registers, ISR flag mismatches, unreachable states
+- **Driver Replay** — Replays register write/read sequences from driver init/ISR patterns against the model, detecting behavioral divergences
+- **Compilation Validator** — Compiles generated C/H files against QEMU v9.2.4 headers using `cc -fsyntax-only` to catch API mismatches
+
+### Agent Framework
+- **Backend abstraction** — `AgentBackend` ABC with two implementations:
+  - `ClaudeBackend` (claude-agent-sdk)
+  - `OpenAIAgentsBackend` (openai-agents)
+- **Harness-first philosophy** — The deterministic pipeline is the primary path; LLM backends are fallbacks when heuristics fail
+- **Tool-driven workflow** — 15+ backend-agnostic tool specifications for both fetch and model phases
+- **6-phase orchestrator** — fetch → extract → infer SM → infer interrupts → infer dependencies → generate bundle
+
+## Project Structure
+
+```
+src/autoemu/
+├── main.py                          # CLI entry point (Click-based)
+├── pipeline.py                      # End-to-end pipeline orchestrator
+├── modeling_utils.py                # Shared utilities
+├── models/                          # Pydantic v2 data layer
+│   ├── register.py                  #   AccessType, BitField, Register, RegisterBlock
+│   ├── peripheral.py                #   Peripheral, PeripheralType, ClockConfig
+│   ├── state_machine.py             #   State, Transition, StateMachine
+│   ├── interrupt.py                 #   InterruptLine, InterruptModel, FlagBehavior
+│   └── dependency.py                #   DependencyEdge, DependencyGraph, DependencyType
+├── parsers/                         # Input parsers
+│   ├── svd_parser.py                #   CMSIS-SVD XML → RegisterBlock
+│   ├── header_parser.py             #   CMSIS C headers → RegisterBlock
+│   ├── driver_parser.py             #   HAL/LL drivers → DriverAnalysis
+│   └── register_extractor.py        #   Merges SVD + header sources
+├── fetchers/                        # Data fetching
+│   └── stm32.py                     #   STM32 fetcher with DuckDuckGo + GitHub
+├── inference/                       # Behavior inference
+│   ├── state_machine_inference.py   #   FSM inference from driver patterns
+│   ├── interrupt_inference.py       #   Interrupt model from ISR analysis
+│   └── dependency_inference.py      #   Cross-peripheral dependency detection
+├── generators/                      # Code generation
+│   ├── qemu_generator.py            #   QEMU v9.2.4 C code (.h, .c, meson, QTest)
+│   ├── test_generator.py            #   Standalone C test harness
+│   └── bundle_generator.py          #   Full model bundle + validation
+├── validators/                      # Model validation
+│   ├── register_validator.py        #   Structural register checks
+│   ├── behavior_validator.py        #   Driver behavior cross-validation
+│   ├── driver_replay.py             #   Register sequence replay engine
+│   └── compile_validator.py         #   C compilation against QEMU headers
+└── agent/                           # LLM agent backends
+    ├── backend.py                   #   AgentBackend ABC, ToolSpec, AgentEvent
+    ├── runtime.py                   #   Harness-first CLI runtime
+    ├── orchestrator.py              #   6-phase prompt-driven pipeline
+    ├── prompts.py                   #   System prompts, AGENTS.md loader
+    ├── tools.py                     #   Backend-agnostic tool specs
+    └── backends/
+        ├── claude_backend.py        #   claude-agent-sdk integration
+        └── openai_backend.py        #   openai-agents integration
+
+tests/                               # 124 tests (pytest + pytest-asyncio)
+├── test_models.py                   #   Core model tests
+├── test_parsers.py                  #   Parser tests
+├── test_inference.py                #   State machine inference tests
+├── test_inference_hardening.py      #   Inference edge case / robustness tests
+├── test_interrupt_inference.py      #   Interrupt inference tests
+├── test_dependency_inference.py     #   Dependency inference tests
+├── test_generators.py               #   QEMU code generation tests
+├── test_validators.py               #   Validation tests
+├── test_compile_validator.py        #   Compilation validation tests
+├── test_bundle_generator.py         #   Bundle generation tests
+├── test_fetchers.py                 #   Fetcher tests
+├── test_backend.py                  #   Agent backend tests
+├── test_cli.py                      #   CLI command tests
+├── test_runtime.py                  #   Runtime tests
+└── test_integration.py              #   End-to-end pipeline tests (3+ targets)
+
+scripts/                             # Build and validation harnesses
+├── build_stm32_guest_firmware.sh    #   Build bare-metal probe firmware
+├── run_stm32_guest_firmware.sh      #   Run firmware under QEMU board model
+├── build_stm32_linux_probe_kernel.sh
+├── build_stm32_linux_rootfs.sh
+├── run_stm32_linux_probe_qemu.sh    #   Boot Buildroot Linux + BusyBox shell
+└── common.sh
+
+data/stm32/                          # Fetched input bundles
+├── <mcu>/                           #   Per-MCU target data
+│   ├── docs/                        #     Reference manuals, datasheets
+│   ├── svd/                         #     CMSIS-SVD device descriptions
+│   ├── headers/                     #     CMSIS device headers
+│   └── drivers/                     #     HAL/LL/RTOS driver sources
+└── manifests/                       #   Fetch manifests (JSON)
+
+output/                              # Generated artifacts
+├── <peripheral>/                    #   Per-peripheral output
+│   ├── stm32_<peripheral>.h         #     QEMU device header
+│   ├── stm32_<peripheral>.c         #     QEMU device implementation
+│   ├── meson.build                  #     Build integration
+│   ├── qtest_stm32_<peripheral>.c   #     QTest harness
+│   ├── test_stm32_<peripheral>.c    #     Standalone C test
+│   ├── *_model.json                 #     Peripheral model
+│   └── *_validation.json            #     Validation report
+```
 
 ## Install
 
@@ -22,139 +148,138 @@ Requires Python 3.11+.
 pip install -e ".[dev]"
 ```
 
-Optional runtime configuration:
+## CLI Commands
+
+### `fetch-data` — Fetch input data for one MCU/peripheral target
 
 ```bash
-export AUTOEMU_AGENT_BACKEND=harness  # default: harness
-export AUTOEMU_AGENT_MODEL=gpt-5.4    # only used for external agent backends
-export AUTOEMU_AGENT_MAX_BUDGET_USD=5
-```
-
-## Build the Binary
-
-Build the standalone CLI first:
-
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && pyinstaller autoemu.spec --clean
-```
-
-This produces:
-
-```bash
-./dist/autoemu
-```
-
-External source trees follow the `build/*-src` layout:
-
-- `build/qemu-src/qemu-9.2.4`
-- `build/linux-src/linux-6.17.0-rc1`
-- `build/buildroot-src/buildroot-2025.05`
-
-## Workflow
-
-### 1. Fetch target data
-
-Fetch the reference manual, datasheet, SVD/header inputs, and relevant HAL/LL/RTOS driver files for one STM32 target:
-
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && ./dist/autoemu fetch-data \
+autoemu fetch-data \
   --target-mcu STM32F407VG \
   --target-peripheral ETH \
   --output data/stm32
 ```
 
-This writes a target-scoped bundle under `data/stm32/` and a manifest under `data/stm32/manifests/`.
+Options:
+- `--target-mcu` — Target MCU (e.g., `STM32F407VG`, `STM32WL55JC`)
+- `--target-peripheral` — Target peripheral (e.g., `ETH`, `USB`, `DMA`, `USART`)
+- `--output` / `-o` — Output directory (default: `data/stm32`)
+- `--refresh` — Re-download files even if cached
+- `--offline` — Use only cached artifacts, skip all network requests
 
-### 2. Build the virtual peripheral
-
-Build the QEMU peripheral directly from the fetched data:
+### `build-qemu-peripheral` — Build QEMU peripheral from fetched data
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && ./dist/autoemu build-qemu-peripheral \
+autoemu build-qemu-peripheral \
   --target-mcu STM32F407VG \
   --target-peripheral ETH \
   --data-dir data/stm32 \
   --output-dir output/eth
 ```
 
-This runs the full modeling pipeline:
+Options:
+- `--target-mcu` — Target MCU
+- `--target-peripheral` — Target peripheral
+- `--data-dir` — Directory with fetched data (default: `data/stm32`)
+- `--output-dir` / `-o` — Output directory (default: `output`)
+- `--offline` — Use only cached data
 
-1. register extraction
-2. state-machine inference
-3. interrupt-model inference
-4. dependency-graph inference
-5. QEMU/test generation
-6. consistency validation
+### `validate-compile` — Validate generated C code compiles against QEMU headers
 
-## Output
+```bash
+autoemu validate-compile \
+  --output-dir output/eth \
+  --qemu-src build/qemu-src/qemu-9.2.4
+```
 
-The build command writes:
+## Pipeline
 
-- `*_registers.json`
-- `*_state_machine.json`
-- `*_interrupt_model.json`
-- `*_dependencies.json`
-- `*_peripheral.json`
-- `stm32_<peripheral>.c`
-- `stm32_<peripheral>.h`
-- `meson.build`
-- `qtest_stm32_<peripheral>.c`
-- `test_stm32_<peripheral>.c`
-- `*_validation.json`
+The `build-qemu-peripheral` command runs a 6-step pipeline:
+
+1. **Register Extraction** — Parse SVD/headers into unified `RegisterBlock` models
+2. **Driver Analysis** — Analyze HAL/LL drivers for access patterns, ISR logic, init sequences
+3. **State Machine Inference** — Build FSM from driver transitions and documentation
+4. **Interrupt Model Inference** — Map flags → registers → enable bits → clear mechanisms
+5. **Dependency Graph Inference** — Detect DMA, clock, GPIO, timer, EXTI dependencies
+6. **Bundle Generation** — Emit QEMU C code, tests, and validation report
+
+## Agent Backends
+
+The pipeline defaults to the deterministic **harness** backend. Set environment variables to route through an LLM:
+
+```bash
+export AUTOEMU_AGENT_BACKEND=harness     # Default: deterministic pipeline
+export AUTOEMU_AGENT_BACKEND=claude      # claude-agent-sdk backend
+export AUTOEMU_AGENT_BACKEND=openai      # openai-agents backend
+export AUTOEMU_AGENT_MODEL=gpt-5.4      # Model override (external backends only)
+export AUTOEMU_AGENT_MAX_BUDGET_USD=5   # Spending cap
+```
+
+## Build the Binary
+
+```bash
+pyinstaller autoemu.spec --clean
+# Produces: ./dist/autoemu
+```
+
+## Testing
+
+```bash
+pytest                              # All 124 tests
+pytest tests/test_integration.py    # End-to-end pipeline tests (USART, SPI, TIM)
+pytest -m integration               # Only integration-marked tests
+pytest -k "test_w1c" -v             # Pattern matching
+```
 
 ## Validation Harnesses
 
 ### Bare-metal guest firmware
 
-Use the guest probe harness when you need full firmware execution against the generated STM32 board model instead of MMIO/qtest-only validation:
+Build and run the probe firmware under the in-repo QEMU board model:
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && ./scripts/build_stm32_guest_firmware.sh
+./scripts/build_stm32_guest_firmware.sh
+./scripts/run_stm32_guest_firmware.sh
 ```
 
-This builds:
-
-```bash
-build/guest-firmware/stm32f4_probe.elf
-```
-
-Run it under the in-repo QEMU board model:
-
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && ./scripts/run_stm32_guest_firmware.sh
-```
-
-If you already have an STM32CubeF4 checkout and want to reuse it instead of letting the build script fetch a pinned copy into `build/third_party/`, set `STM32CUBEF4_ROOT`:
-
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && \
-  STM32CUBEF4_ROOT=/tmp/STM32CubeF4-min ./scripts/run_stm32_guest_firmware.sh
-```
-
-The guest probe firmware exercises:
-
-- `HAL_DMA_Init()` / `HAL_DMA_Start_IT()` with real IRQ delivery
-- `HAL_ETH_Init()` / `HAL_ETH_Start()`
-- `HAL_PCD_Init()` / `HAL_PCD_Start()`
-- the SUBGHZ MMIO/IRQ path on the test board mapping
+Exercises: `HAL_DMA_Init()`, `HAL_ETH_Init()`, `HAL_PCD_Init()`, SUBGHZ MMIO/IRQ.
 
 ### Linux probe harness
 
-Use the Linux probe harness when you want a minimal Buildroot userspace, automatic driver probing, and an interactive serial shell on `ttyAMA0`:
+Boot a Buildroot rootfs with automatic driver probing:
 
 ```bash
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate agent && ./scripts/run_stm32_linux_probe_qemu.sh
+./scripts/run_stm32_linux_probe_qemu.sh
 ```
 
-This workflow:
+Probes DMA, ETH, USB, and Radio, then provides a BusyBox shell on `ttyAMA0`.
 
-1. Builds a Buildroot 2025.05 rootfs if needed.
-2. Embeds that rootfs into the Linux `vmlinux` as initramfs.
-3. Boots the in-repo `stm32f4-board` model under QEMU.
-4. Probes DMA, ETH, USB, and Radio, then leaves a BusyBox shell available on `ttyAMA0`.
+## External Source Trees
 
-## Notes
+```
+build/
+├── qemu-src/qemu-9.2.4/           # QEMU source (compilation validation target)
+├── linux-src/linux-6.17.0-rc1/    # Linux kernel (probe harness)
+├── buildroot-src/buildroot-2025.05/ # Buildroot (rootfs builder)
+└── third_party/STM32CubeF4/       # STM32 HAL/LL drivers
+```
 
-- The fetcher is target-based. It does not keep hardcoded board/peripheral bundles or source-tree peripheral templates in the CLI workflow.
-- The build step resolves fetched inputs from the manifest and target data directory.
-- At least one register source (`.svd` or CMSIS header) and one driver source must exist for the build to proceed.
+## Register Access Semantics
+
+The model precisely handles all CMSIS access types:
+
+| Type | Behavior |
+|------|----------|
+| `RW` | Standard read-write |
+| `RO` | Read-only, writes ignored |
+| `WO` | Write-only, reads return 0 |
+| `W1C` | Write-1-to-clear (status flags) |
+| `W1S` | Write-1-to-set |
+| `W0C` | Write-0-to-clear |
+| `RC_W1` | Read-clear + write-1-to-clear |
+| `RC_W0` | Read-clear + write-0-to-clear |
+| `RS` | Read-to-set |
+| `RSVD` | Reserved, writes preserved |
+
+## License
+
+MIT

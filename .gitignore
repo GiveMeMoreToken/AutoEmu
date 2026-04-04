@@ -36,4 +36,11 @@ Thumbs.db
 .env
 .env.*
 
+# Claude Code
+.claude/
+
+# Linting
+.ruff_cache/
+
+# Data (fetched artifacts)
 data/

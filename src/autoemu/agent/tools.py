@@ -127,12 +127,14 @@ async def _parse_header(args: dict[str, Any]) -> dict[str, Any]:
 async def _extract_register_structure(args: dict[str, Any]) -> dict[str, Any]:
     try:
         periph = args.get("peripheral_name") or None
-        blocks = extract_register_blocks(
+        blocks, warnings = extract_register_blocks(
             svd_path=args.get("svd_path", ""),
             header_path=args.get("header_path", ""),
             peripheral_name=periph,
         )
         result = {name: blk.model_dump() for name, blk in blocks.items()}
+        if warnings:
+            result["_warnings"] = warnings
         return _ok(json.dumps(result, indent=2))
     except Exception as e:
         return _err(f"Register extraction failed: {e}")

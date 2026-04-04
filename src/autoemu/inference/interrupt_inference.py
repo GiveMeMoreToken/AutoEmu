@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from autoemu.modeling_utils import (
@@ -29,6 +30,28 @@ def infer_interrupt_model(
     peripheral_name: str = "",
 ) -> InterruptModel:
     """Infer an interrupt model from driver ISR patterns and register metadata."""
+    try:
+        return _infer_interrupt_model_impl(
+            driver_analysis, register_blocks, peripheral_name=peripheral_name
+        )
+    except Exception as exc:
+        periph = peripheral_name or "PERIPHERAL"
+        print(f"[autoemu] warning: interrupt inference failed: {exc}", file=sys.stderr)
+        return InterruptModel(
+            peripheral_name=periph,
+            lines=[],
+            event_sources=[],
+            flag_to_event_map={},
+        )
+
+
+def _infer_interrupt_model_impl(
+    driver_analysis: DriverAnalysis | dict[str, Any],
+    register_blocks: dict[str, RegisterBlock] | dict[str, Any] | None = None,
+    *,
+    peripheral_name: str = "",
+) -> InterruptModel:
+    """Core implementation of interrupt model inference."""
     analysis = normalize_driver_analysis(driver_analysis)
     blocks = normalize_register_blocks(register_blocks or {})
 

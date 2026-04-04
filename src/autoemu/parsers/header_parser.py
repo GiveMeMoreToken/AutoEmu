@@ -6,12 +6,15 @@ and bit-field macro definitions from STM32 CMSIS headers.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,6 +70,11 @@ _RE_PERIPH_CAST = re.compile(
 _RE_BIT_DEF = re.compile(
     r"#define\s+(\w+)_(\w+)_(\w+)(?:_(\w+))?\s+"
     r"(?:\(\s*)?(0x[0-9A-Fa-f]+U?|[\d]+U?)(?:\s*\))?"
+)
+# Matches: #define PERIPH_REG  (PERIPH_BASE + 0xNN)
+# Used as a fallback when no struct layout is found.
+_RE_DEFINE_REG_OFFSET = re.compile(
+    r"#define\s+(\w+?)_(\w+)\s+\(\s*(\w+_BASE)\s*\+\s*(0x[0-9A-Fa-f]+)U?\s*\)"
 )
 _RE_POS_DEF = re.compile(
     r"#define\s+(\w+)_(\w+)_(\w+)_Pos\s+\((\d+)U?\)"
@@ -309,25 +317,72 @@ def struct_to_register_block(
     )
 
 
+def _define_based_register_blocks(
+    content: str,
+    base_addrs: dict[str, int],
+    peripheral_name: str | None = None,
+) -> dict[str, RegisterBlock]:
+    """Fallback: create register blocks from ``#define PERIPH_REG (BASE + offset)`` patterns."""
+    # Collect: periph_prefix -> list of (reg_name, offset)
+    periph_regs: dict[str, list[tuple[str, int]]] = {}
+    for m in _RE_DEFINE_REG_OFFSET.finditer(content):
+        prefix = m.group(1)
+        reg_name = m.group(2)
+        base_key = m.group(3)
+        offset = int(m.group(4), 16)
+        # Skip _BASE self-definitions and common non-register suffixes
+        if reg_name == "BASE" or reg_name.endswith("_BASE"):
+            continue
+        if peripheral_name and prefix != peripheral_name:
+            continue
+        periph_regs.setdefault(prefix, []).append((reg_name, offset))
+
+    results: dict[str, RegisterBlock] = {}
+    for prefix, regs in periph_regs.items():
+        base_key = f"{prefix}_BASE"
+        base = base_addrs.get(base_key, 0)
+        registers = [
+            Register(name=rn, offset=off, size=32, access=AccessType.RW, reset_value=0, fields=[])
+            for rn, off in sorted(regs, key=lambda x: x[1])
+        ]
+        results[prefix] = RegisterBlock(name=prefix, base_address=base, registers=registers)
+    return results
+
+
 def parse_header_file(
     path: str | Path, peripheral_name: str | None = None
 ) -> dict[str, RegisterBlock]:
     """Parse a C header file and extract register blocks.
 
     If peripheral_name is given, only extract that peripheral.
+    Returns an empty dict on error rather than crashing.
     """
-    content = Path(path).read_text(encoding="utf-8", errors="replace")
-    structs = parse_typedef_structs(content)
-    base_addrs = parse_base_addresses(content)
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.warning("Failed to read header file '%s': %s", path, exc)
+        return {}
 
-    results: dict[str, RegisterBlock] = {}
-    for s in structs:
-        prefix = s.name.replace("_TypeDef", "")
-        if peripheral_name and prefix != peripheral_name:
-            continue
-        bit_defs = parse_bit_definitions(content, prefix)
-        base_key = f"{prefix}_BASE"
-        base = base_addrs.get(base_key, 0)
-        results[prefix] = struct_to_register_block(s, bit_defs, base)
+    try:
+        structs = parse_typedef_structs(content)
+        base_addrs = parse_base_addresses(content)
 
-    return results
+        results: dict[str, RegisterBlock] = {}
+        for s in structs:
+            prefix = s.name.replace("_TypeDef", "")
+            if peripheral_name and prefix != peripheral_name:
+                continue
+            bit_defs = parse_bit_definitions(content, prefix)
+            base_key = f"{prefix}_BASE"
+            base = base_addrs.get(base_key, 0)
+            results[prefix] = struct_to_register_block(s, bit_defs, base)
+
+        # Fallback: if no struct was found for the requested peripheral,
+        # try #define-based register extraction.
+        if not results:
+            results = _define_based_register_blocks(content, base_addrs, peripheral_name)
+
+        return results
+    except Exception as exc:
+        logger.warning("Header parse error for '%s': %s", path, exc)
+        return {}
