@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from autoemu.validators.compile_validator import find_qemu_include_paths, validate_compile
+from autoemu.validators.compile_validator import (
+    find_qemu_include_paths,
+    validate_compile,
+    validate_meson_build,
+)
 
 
 def test_find_qemu_include_paths_missing_source():
@@ -80,3 +84,88 @@ def test_validate_compile_h_file(tmp_path):
     result = validate_compile([str(h_file)], qemu_src=fake_qemu)
     assert result["success"] is True
     assert result["files_checked"] == 1
+
+
+# ---------------------------------------------------------------------------
+# validate_meson_build tests
+# ---------------------------------------------------------------------------
+
+def test_validate_meson_build_valid(tmp_path):
+    """A well-formed meson.build snippet passes validation."""
+    c_file = tmp_path / "stm32f4xx_usart.c"
+    c_file.write_text("/* stub */\n")
+
+    meson = tmp_path / "meson.build"
+    meson.write_text(
+        "system_ss.add(when: 'CONFIG_STM32F4XX_USART', "
+        "if_true: files('stm32f4xx_usart.c'))\n"
+    )
+
+    result = validate_meson_build(meson)
+    assert result["valid"] is True
+    assert result["errors"] == []
+
+
+def test_validate_meson_build_missing_file(tmp_path):
+    """Reports an error when the meson.build does not exist."""
+    result = validate_meson_build(tmp_path / "nonexistent" / "meson.build")
+    assert result["valid"] is False
+    assert any("does not exist" in e for e in result["errors"])
+
+
+def test_validate_meson_build_empty(tmp_path):
+    """Reports an error when the meson.build is empty."""
+    meson = tmp_path / "meson.build"
+    meson.write_text("")
+
+    result = validate_meson_build(meson)
+    assert result["valid"] is False
+    assert any("empty" in e.lower() for e in result["errors"])
+
+
+def test_validate_meson_build_missing_system_ss(tmp_path):
+    """Reports an error when system_ss.add( is missing."""
+    meson = tmp_path / "meson.build"
+    meson.write_text("some_other_call(when: 'X', if_true: files('a.c'))\n")
+    (tmp_path / "a.c").write_text("/* stub */\n")
+
+    result = validate_meson_build(meson)
+    assert result["valid"] is False
+    assert any("system_ss.add(" in e for e in result["errors"])
+
+
+def test_validate_meson_build_missing_when(tmp_path):
+    """Reports an error when 'when:' is missing."""
+    meson = tmp_path / "meson.build"
+    meson.write_text("system_ss.add(if_true: files('a.c'))\n")
+    (tmp_path / "a.c").write_text("/* stub */\n")
+
+    result = validate_meson_build(meson)
+    assert result["valid"] is False
+    assert any("when:" in e for e in result["errors"])
+
+
+def test_validate_meson_build_missing_c_source(tmp_path):
+    """Reports an error when the referenced .c file does not exist."""
+    meson = tmp_path / "meson.build"
+    meson.write_text(
+        "system_ss.add(when: 'CONFIG_X', if_true: files('missing.c'))\n"
+    )
+
+    result = validate_meson_build(meson)
+    assert result["valid"] is False
+    assert any("missing.c" in e for e in result["errors"])
+
+
+def test_validate_compile_includes_meson_build(tmp_path):
+    """validate_compile checks meson.build files and reports errors."""
+    meson = tmp_path / "meson.build"
+    meson.write_text("# empty-ish\n")
+
+    fake_qemu = tmp_path / "qemu_src"
+    (fake_qemu / "include" / "qemu").mkdir(parents=True)
+
+    result = validate_compile([str(meson)], qemu_src=fake_qemu)
+    assert result["files_checked"] == 1
+    assert result["success"] is False
+    assert len(result["errors"]) == 1

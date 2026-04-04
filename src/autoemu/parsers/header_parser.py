@@ -17,6 +17,124 @@ from autoemu.models.register import AccessType, BitField, Register, RegisterBloc
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Minimal C preprocessor
+# ---------------------------------------------------------------------------
+
+_RE_INCLUDE_QUOTED = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
+_RE_IFDEF = re.compile(r"^\s*#\s*ifdef\s+(\w+)")
+_RE_IFNDEF = re.compile(r"^\s*#\s*ifndef\s+(\w+)")
+_RE_ELSE = re.compile(r"^\s*#\s*else\b")
+_RE_ENDIF = re.compile(r"^\s*#\s*endif\b")
+_RE_PP_DEFINE_SYM = re.compile(r"^\s*#\s*define\s+(\w+)(?:\s+(.*))?$")
+
+
+def preprocess_header(
+    content: str,
+    *,
+    include_dirs: list[str] | None = None,
+    defines: dict[str, str] | None = None,
+) -> str:
+    """Minimal C preprocessor: resolve ``#include`` directives and evaluate
+    ``#ifdef``/``#ifndef``/``#else``/``#endif`` blocks.
+
+    * Tracks conditional nesting with a stack.
+    * ``#ifdef SYMBOL`` where *SYMBOL* is **not** in *defines* → skip until
+      matching ``#else`` or ``#endif``.
+    * ``#ifndef SYMBOL`` where *SYMBOL* **is** in *defines* → skip.
+    * ``#include "file.h"`` — search *include_dirs* and inline (with a
+      recursion guard to prevent infinite loops).
+    * ``#include <system_header.h>`` (angle-bracket) is ignored.
+    """
+    include_dirs = include_dirs or []
+    defines = dict(defines) if defines else {}
+    seen_includes: set[str] = set()
+
+    def _resolve(
+        text: str,
+        inc_dirs: list[str],
+        defs: dict[str, str],
+        seen: set[str],
+    ) -> list[str]:
+        output_lines: list[str] = []
+        # Stack of (active, seen_else) — *active* means we are emitting lines.
+        cond_stack: list[tuple[bool, bool]] = []
+
+        def _currently_active() -> bool:
+            return all(active for active, _ in cond_stack)
+
+        for line in text.splitlines():
+            # --- #ifdef ---
+            m = _RE_IFDEF.match(line)
+            if m:
+                symbol = m.group(1)
+                active = symbol in defs
+                cond_stack.append((active, False))
+                continue
+
+            # --- #ifndef ---
+            m = _RE_IFNDEF.match(line)
+            if m:
+                symbol = m.group(1)
+                active = symbol not in defs
+                cond_stack.append((active, False))
+                continue
+
+            # --- #else ---
+            if _RE_ELSE.match(line):
+                if cond_stack:
+                    prev_active, _ = cond_stack[-1]
+                    cond_stack[-1] = (not prev_active, True)
+                continue
+
+            # --- #endif ---
+            if _RE_ENDIF.match(line):
+                if cond_stack:
+                    cond_stack.pop()
+                continue
+
+            if not _currently_active():
+                continue
+
+            # --- #define (collect into defs so later #ifdef can see it) ---
+            dm = _RE_PP_DEFINE_SYM.match(line)
+            if dm:
+                defs[dm.group(1)] = (dm.group(2) or "").strip()
+
+            # --- #include "file.h" ---
+            m = _RE_INCLUDE_QUOTED.match(line)
+            if m:
+                filename = m.group(1)
+                resolved = _find_include(filename, inc_dirs)
+                if resolved and resolved not in seen:
+                    seen.add(resolved)
+                    try:
+                        inc_content = Path(resolved).read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                        output_lines.extend(
+                            _resolve(inc_content, inc_dirs, defs, seen)
+                        )
+                    except Exception as exc:  # pragma: no cover
+                        logger.debug("Failed to read included file %s: %s", resolved, exc)
+                continue
+
+            output_lines.append(line)
+
+        return output_lines
+
+    return "\n".join(_resolve(content, include_dirs, defines, seen_includes))
+
+
+def _find_include(filename: str, include_dirs: list[str]) -> str | None:
+    """Search *include_dirs* for *filename* and return the first match."""
+    for d in include_dirs:
+        candidate = Path(d) / filename
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
+
+
 @dataclass
 class MacroDef:
     name: str
@@ -350,18 +468,32 @@ def _define_based_register_blocks(
 
 
 def parse_header_file(
-    path: str | Path, peripheral_name: str | None = None
+    path: str | Path,
+    peripheral_name: str | None = None,
+    *,
+    include_dirs: list[str] | None = None,
+    defines: dict[str, str] | None = None,
 ) -> dict[str, RegisterBlock]:
     """Parse a C header file and extract register blocks.
 
     If peripheral_name is given, only extract that peripheral.
     Returns an empty dict on error rather than crashing.
+
+    Parameters
+    ----------
+    include_dirs:
+        Directories to search when resolving ``#include "file.h"`` directives.
+    defines:
+        Pre-defined symbols for ``#ifdef``/``#ifndef`` evaluation.
     """
     try:
         content = Path(path).read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         logger.warning("Failed to read header file '%s': %s", path, exc)
         return {}
+
+    # Run minimal preprocessor before parsing
+    content = preprocess_header(content, include_dirs=include_dirs, defines=defines)
 
     try:
         structs = parse_typedef_structs(content)

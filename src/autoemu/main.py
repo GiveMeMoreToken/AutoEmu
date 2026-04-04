@@ -22,7 +22,8 @@ def cli():
 @click.option("--output", "-o", default="data/stm32", help="Output directory")
 @click.option("--refresh", is_flag=True, help="Redownload files even if they already exist")
 @click.option("--offline", is_flag=True, help="Only use cached artifacts, skip all network requests")
-def fetch_data_cmd(target_mcu, target_peripheral, output, refresh, offline):
+@click.option("--platform", default="stm32", help="Platform plugin to use (default: stm32)")
+def fetch_data_cmd(target_mcu, target_peripheral, output, refresh, offline, platform):
     """Fetch STM32 input data for one MCU/peripheral target."""
     result = _run_cli_action(
         lambda: AutoEmuAgentRuntime().fetch_data(
@@ -42,7 +43,8 @@ def fetch_data_cmd(target_mcu, target_peripheral, output, refresh, offline):
 @click.option("--data-dir", default="data/stm32", help="Directory containing fetched data")
 @click.option("--output-dir", "-o", default="output", help="Directory for generated artifacts")
 @click.option("--offline", is_flag=True, help="Use only cached data, skip network requests")
-def build_qemu_peripheral_cmd(target_mcu, target_peripheral, data_dir, output_dir, offline):
+@click.option("--platform", default="stm32", help="Platform plugin to use (default: stm32)")
+def build_qemu_peripheral_cmd(target_mcu, target_peripheral, data_dir, output_dir, offline, platform):
     """Build a QEMU-ready peripheral model from fetched target data."""
     result = _run_cli_action(
         lambda: AutoEmuAgentRuntime().build_qemu_peripheral(

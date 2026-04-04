@@ -361,12 +361,12 @@ src/autoemu/
 
 ## Success Criteria
 
-| Phase | Criterion |
-|-------|-----------|
-| 1 | `autoemu fetch-data && autoemu build-qemu-peripheral` succeeds for 3+ STM32 targets; generated C compiles against QEMU v9.2.4 |
-| 2 | All existing tests pass after refactor; `Platform` ABC defined with STM32 as first plugin |
-| 3 | MIPS platform produces compilable QEMU peripheral code for at least 1 MCU; cross-platform tests pass |
-| 4 | Security validators catch known-bad patterns; driver replay detects intentional model regressions; fuzzing harness compiles and runs |
+| Phase | Criterion | Status |
+|-------|-----------|--------|
+| 1 | `autoemu fetch-data && autoemu build-qemu-peripheral` succeeds for 3+ STM32 targets; generated C compiles against QEMU v9.2.4 | **DONE** |
+| 2 | All existing tests pass after refactor; `Platform` ABC defined with STM32 as first plugin | **DONE** |
+| 3 | MIPS platform produces compilable QEMU peripheral code for at least 1 MCU; cross-platform tests pass | **DONE** |
+| 4 | Security validators catch known-bad patterns; driver replay detects intentional model regressions; fuzzing harness compiles and runs | **DONE** |
 
 ---
 

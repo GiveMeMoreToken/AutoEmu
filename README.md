@@ -39,11 +39,20 @@ AutoEmu is a harness-first agent framework that automatically generates QEMU-com
   - `test_stm32_<peripheral>.c` — Standalone C test harness
   - `*_model.json` — Complete peripheral model in JSON
 
-### Validation
+### Validation & Security
 - **Register Validator** — Structural checks: overlapping offsets/fields, duplicate names, field width violations, reset value consistency
 - **Behavior Validator** — Cross-validates model against driver analysis: missing registers, ISR flag mismatches, unreachable states
-- **Driver Replay** — Replays register write/read sequences from driver init/ISR patterns against the model, detecting behavioral divergences
-- **Compilation Validator** — Compiles generated C/H files against QEMU v9.2.4 headers using `cc -fsyntax-only` to catch API mismatches
+- **Driver Replay** — Replays register write/read sequences with full lifecycle support (init → configure → operate → error → teardown), per-stage accuracy metrics, and multi-version driver comparison
+- **Compilation Validator** — Compiles generated C/H files against QEMU v9.2.4 headers using `cc -fsyntax-only`, validates meson.build structural correctness
+- **Security Validator** — 5 rule categories: DMA boundary checks, privilege escalation detection, interrupt safety (infinite IRQ loop prevention), reserved field write warnings, configuration lock bypass detection
+- **Fuzz Generator** — Generates AFL/libFuzzer harnesses targeting QEMU `MemoryRegionOps`: register fuzzer (random offsets + values) and state transition fuzzer (FSM race sequences)
+
+### Platform Abstraction
+- **Platform ABC** — Abstract interface (`Platform`) with methods: `discover_inputs()`, `parse_registers()`, `parse_drivers()`, `qemu_target_info()`, `naming_convention()`
+- **Platform Registry** — `get_platform("stm32")`, `get_platform("mips")`, `list_platforms()`
+- **STM32 Plugin** — Wraps existing SVD/header/HAL parsers behind the platform interface
+- **MIPS Plugin** — PDF register table extractor, device tree parser, vendor header parser (non-CMSIS), Linux kernel driver parser (`readl`/`writel`, `platform_driver`, `request_irq`)
+- **Generic Fetcher Base** — Reusable HTTP/cache/manifest logic extracted from STM32 fetcher
 
 ### Agent Framework
 - **Backend abstraction** — `AgentBackend` ABC with two implementations:
@@ -80,12 +89,25 @@ src/autoemu/
 ├── generators/                      # Code generation
 │   ├── qemu_generator.py            #   QEMU v9.2.4 C code (.h, .c, meson, QTest)
 │   ├── test_generator.py            #   Standalone C test harness
-│   └── bundle_generator.py          #   Full model bundle + validation
+│   ├── bundle_generator.py          #   Full model bundle + validation
+│   └── fuzz_generator.py            #   AFL/libFuzzer harness generation
 ├── validators/                      # Model validation
 │   ├── register_validator.py        #   Structural register checks
 │   ├── behavior_validator.py        #   Driver behavior cross-validation
-│   ├── driver_replay.py             #   Register sequence replay engine
-│   └── compile_validator.py         #   C compilation against QEMU headers
+│   ├── driver_replay.py             #   Lifecycle replay + version comparison
+│   ├── compile_validator.py         #   C compilation + meson validation
+│   └── security_validator.py        #   Security audit (5 rule categories)
+├── platforms/                       # Platform plugin system
+│   ├── __init__.py                  #   Registry: get_platform(), list_platforms()
+│   ├── base.py                      #   Platform ABC, QEMUTargetInfo, NamingInfo
+│   ├── stm32/__init__.py            #   STM32Platform (wraps existing parsers)
+│   └── mips/                        #   MIPS platform plugin
+│       ├── __init__.py              #     MIPSPlatform implementation
+│       ├── naming.py                #     MIPS naming conventions
+│       └── parsers/                 #     PDF, DT, header, kernel driver parsers
+├── fetchers/
+│   ├── base.py                      #   Generic HTTP/cache/manifest logic
+│   └── stm32.py                     #   STM32-specific fetcher
 └── agent/                           # LLM agent backends
     ├── backend.py                   #   AgentBackend ABC, ToolSpec, AgentEvent
     ├── runtime.py                   #   Harness-first CLI runtime
@@ -96,7 +118,7 @@ src/autoemu/
         ├── claude_backend.py        #   claude-agent-sdk integration
         └── openai_backend.py        #   openai-agents integration
 
-tests/                               # 124 tests (pytest + pytest-asyncio)
+tests/                               # 207 tests (pytest + pytest-asyncio)
 ├── test_models.py                   #   Core model tests
 ├── test_parsers.py                  #   Parser tests
 ├── test_inference.py                #   State machine inference tests
@@ -111,7 +133,12 @@ tests/                               # 124 tests (pytest + pytest-asyncio)
 ├── test_backend.py                  #   Agent backend tests
 ├── test_cli.py                      #   CLI command tests
 ├── test_runtime.py                  #   Runtime tests
-└── test_integration.py              #   End-to-end pipeline tests (3+ targets)
+├── test_integration.py              #   End-to-end pipeline tests (3+ targets)
+├── test_platforms.py                #   Platform abstraction tests
+├── test_mips_platform.py            #   MIPS platform parser tests
+├── test_security_validator.py       #   Security audit validator tests
+├── test_fuzz_generator.py           #   Fuzz harness generation tests
+└── test_driver_replay_lifecycle.py  #   Lifecycle replay + version comparison
 
 scripts/                             # Build and validation harnesses
 ├── build_stm32_guest_firmware.sh    #   Build bare-metal probe firmware
@@ -224,7 +251,7 @@ pyinstaller autoemu.spec --clean
 ## Testing
 
 ```bash
-pytest                              # All 124 tests
+pytest                              # All 207 tests
 pytest tests/test_integration.py    # End-to-end pipeline tests (USART, SPI, TIM)
 pytest -m integration               # Only integration-marked tests
 pytest -k "test_w1c" -v             # Pattern matching

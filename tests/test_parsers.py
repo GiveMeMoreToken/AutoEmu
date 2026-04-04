@@ -7,6 +7,7 @@ from autoemu.parsers.header_parser import (
     parse_base_addresses,
     parse_bit_definitions,
     parse_header_file,
+    preprocess_header,
 )
 from autoemu.parsers.register_extractor import merge_register_blocks, extract_register_blocks
 from autoemu.parsers.driver_parser import analyze_driver_string
@@ -383,3 +384,147 @@ void HAL_ETH_Foo(ETH_HandleTypeDef *heth)
         assert "PR" in written_regs
         assert "gState" not in written_regs
         assert "TxCpltCallback" not in written_regs
+
+
+class TestPreprocessHeader:
+    def test_ifdef_defined_symbol_included(self):
+        content = """\
+#ifdef HAS_FEATURE
+int feature_enabled = 1;
+#endif
+int always_here = 1;
+"""
+        result = preprocess_header(content, defines={"HAS_FEATURE": ""})
+        assert "feature_enabled" in result
+        assert "always_here" in result
+
+    def test_ifdef_undefined_symbol_excluded(self):
+        content = """\
+#ifdef HAS_FEATURE
+int feature_enabled = 1;
+#endif
+int always_here = 1;
+"""
+        result = preprocess_header(content, defines={})
+        assert "feature_enabled" not in result
+        assert "always_here" in result
+
+    def test_ifndef_defined_symbol_excluded(self):
+        content = """\
+#ifndef GUARD
+int guarded = 1;
+#endif
+"""
+        result = preprocess_header(content, defines={"GUARD": ""})
+        assert "guarded" not in result
+
+    def test_ifndef_undefined_symbol_included(self):
+        content = """\
+#ifndef GUARD
+int guarded = 1;
+#endif
+"""
+        result = preprocess_header(content, defines={})
+        assert "guarded" in result
+
+    def test_ifdef_else(self):
+        content = """\
+#ifdef USE_A
+int path_a = 1;
+#else
+int path_b = 1;
+#endif
+"""
+        result = preprocess_header(content, defines={"USE_A": ""})
+        assert "path_a" in result
+        assert "path_b" not in result
+
+        result2 = preprocess_header(content, defines={})
+        assert "path_a" not in result2
+        assert "path_b" in result2
+
+    def test_nested_ifdefs(self):
+        content = """\
+#ifdef OUTER
+#ifdef INNER
+int both = 1;
+#endif
+int outer_only = 1;
+#endif
+"""
+        result = preprocess_header(content, defines={"OUTER": "", "INNER": ""})
+        assert "both" in result
+        assert "outer_only" in result
+
+        result2 = preprocess_header(content, defines={"OUTER": ""})
+        assert "both" not in result2
+        assert "outer_only" in result2
+
+        result3 = preprocess_header(content, defines={})
+        assert "both" not in result3
+        assert "outer_only" not in result3
+
+    def test_include_resolution(self, tmp_path):
+        inc_dir = tmp_path / "inc"
+        inc_dir.mkdir()
+        (inc_dir / "defs.h").write_text("#define MY_VAL 42\n")
+
+        content = '#include "defs.h"\nint x = MY_VAL;\n'
+        result = preprocess_header(content, include_dirs=[str(inc_dir)])
+        assert "#define MY_VAL 42" in result
+        assert "int x = MY_VAL;" in result
+
+    def test_include_recursion_guard(self, tmp_path):
+        inc_dir = tmp_path / "inc"
+        inc_dir.mkdir()
+        # a.h includes b.h, b.h includes a.h -> should not loop
+        (inc_dir / "a.h").write_text('#include "b.h"\nint from_a = 1;\n')
+        (inc_dir / "b.h").write_text('#include "a.h"\nint from_b = 1;\n')
+
+        content = '#include "a.h"\n'
+        result = preprocess_header(content, include_dirs=[str(inc_dir)])
+        assert "from_a" in result
+        assert "from_b" in result
+
+    def test_angle_bracket_include_ignored(self):
+        content = '#include <stdio.h>\nint x = 1;\n'
+        result = preprocess_header(content)
+        assert "int x = 1;" in result
+        # The angle-bracket include line should not appear (it's not processed)
+        assert "#include <stdio.h>" not in result or "int x = 1;" in result
+
+    def test_include_missing_file_no_crash(self):
+        content = '#include "nonexistent.h"\nint x = 1;\n'
+        result = preprocess_header(content, include_dirs=["/tmp/empty_dir_xyz"])
+        assert "int x = 1;" in result
+
+    def test_parse_header_file_with_preprocessor(self, tmp_path):
+        """parse_header_file passes include_dirs and defines through."""
+        inc_dir = tmp_path / "inc"
+        inc_dir.mkdir()
+        (inc_dir / "base.h").write_text(
+            "#define PERIPH_BASE (0x40000000UL)\n"
+            "#define APB1_BASE   (PERIPH_BASE + 0x00000000UL)\n"
+        )
+        header = tmp_path / "periph.h"
+        header.write_text(
+            '#include "base.h"\n'
+            "#ifdef USE_MY_PERIPH\n"
+            "typedef struct {\n"
+            "  __IO uint32_t CR;\n"
+            "} MY_TypeDef;\n"
+            "#define MY_BASE (APB1_BASE + 0x100UL)\n"
+            "#endif\n"
+        )
+        # Without the define, no peripheral is found
+        result_empty = parse_header_file(
+            header, "MY", include_dirs=[str(inc_dir)], defines={}
+        )
+        assert result_empty == {}
+
+        # With the define, it is found
+        result = parse_header_file(
+            header, "MY", include_dirs=[str(inc_dir)], defines={"USE_MY_PERIPH": ""}
+        )
+        assert "MY" in result
+        assert result["MY"].base_address == 0x40000100
