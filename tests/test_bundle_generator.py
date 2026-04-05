@@ -122,9 +122,9 @@ def test_generate_model_bundle_writes_artifacts_and_validation(tmp_path):
 
     generated_names = {Path(path).name for path in result["generated_files"]}
     assert "usart1_peripheral.json" in generated_names
-    assert "stm32_usart1.c" in generated_names
-    assert "stm32_usart1.h" in generated_names
-    assert "test_stm32_usart1.c" in generated_names
+    assert "stm32f4_usart1.c" in generated_names
+    assert "stm32f4_usart1.h" in generated_names
+    assert "test_stm32f4_usart1.c" in generated_names
     assert "usart1_validation.json" in generated_names
     assert result["validation_report"]["success"]
     assert result["validation_report"]["driver_replay"]["applied_operations"] >= 1

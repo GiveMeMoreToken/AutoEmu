@@ -32,9 +32,10 @@ output/
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment / config (may contain API keys)
 .env
 .env.*
+.autoemu.toml
 
 # Claude Code
 .claude/

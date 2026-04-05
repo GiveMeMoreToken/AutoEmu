@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from autoemu.platforms import get_platform, list_platforms
+from autoemu.platforms import analyze_target, detect_platform, get_platform, list_platforms
 from autoemu.platforms.base import (
     AssetDescriptor,
     InputBundle,
@@ -207,3 +207,57 @@ def test_fetch_manifest_round_trip(tmp_path: Path):
     assert loaded.platform == "stm32"
     assert loaded.success is True
     assert "test warning" in loaded.warnings
+
+
+# --- analyze_target / detect_platform tests ---
+
+
+def test_analyze_target_stm32():
+    info = analyze_target("STM32F407VG")
+    assert info.vendor == "stmicro"
+    assert info.platform == "stm32"
+    assert info.arch == "arm"
+
+
+def test_analyze_target_hisilicon():
+    info = analyze_target("HIKEY960")
+    assert info.vendor == "hisilicon"
+    assert info.arch == "arm64"
+    assert "Kirin" in info.family
+
+
+def test_analyze_target_kirin():
+    info = analyze_target("kirin960")
+    assert info.vendor == "hisilicon"
+    assert info.platform == "generic"
+
+
+def test_analyze_target_esp32():
+    info = analyze_target("ESP32")
+    assert info.vendor == "espressif"
+    assert info.arch == "xtensa"
+
+
+def test_analyze_target_nordic():
+    info = analyze_target("NRF52840")
+    assert info.vendor == "nordic"
+    assert info.arch == "arm"
+
+
+def test_analyze_target_qualcomm():
+    info = analyze_target("SM8550")
+    assert info.vendor == "qualcomm"
+    assert info.arch == "arm64"
+
+
+def test_analyze_target_unknown():
+    info = analyze_target("MYSTERY_CHIP_9000")
+    assert info.vendor == "unknown"
+    assert info.platform == "generic"
+
+
+def test_detect_platform_returns_registered_name():
+    assert detect_platform("STM32F407VG") == "stm32"
+    assert detect_platform("kirin960") == "generic"
+    assert detect_platform("ESP32") == "generic"
+    assert detect_platform("pic32mx") == "mips"

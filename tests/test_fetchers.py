@@ -1,4 +1,4 @@
-"""Tests for generic STM32 source-data fetching."""
+"""Tests for the generic data fetcher and input resolution."""
 
 from __future__ import annotations
 
@@ -6,34 +6,26 @@ import json
 from pathlib import Path
 
 from autoemu.agent.prompts import build_system_prompt
-from autoemu.fetchers.stm32 import (
-    FetchRequest,
+from autoemu.fetchers.generic import (
     SearchResult,
-    STM32DataFetcher,
-    _materialize_download_url,
-    _token_present,
-    build_asset_requests,
-    infer_stm32_device_stem,
-    infer_stm32_driver_prefix,
-    infer_stm32_header_name,
+    GenericDataFetcher,
+    DuckDuckGoSearcher,
     infer_stm32_mcu_family,
-    normalize_stm32_target_mcu,
     normalize_target_peripheral,
     peripheral_search_tokens,
     resolve_fetched_input_bundle,
 )
 
 
-class FakeSearcher:
-    def __init__(self, mapping: dict[str, str]) -> None:
-        self.mapping = mapping
+class FakeSearcher(DuckDuckGoSearcher):
+    """Searcher that returns canned results without hitting the network."""
+
+    def __init__(self, results: list[SearchResult] | None = None) -> None:
+        super().__init__()
+        self._results = results or []
 
     def search(self, query: str, *, max_results: int = 8):
-        query_lower = query.lower()
-        for token, path in self.mapping.items():
-            if token in query_lower:
-                return [SearchResult(title=Path(path).name, url=Path(path).as_uri())]
-        return []
+        return self._results[:max_results]
 
 
 def test_build_system_prompt_includes_agents_constraints():
@@ -42,170 +34,80 @@ def test_build_system_prompt_includes_agents_constraints():
     assert "Source Policy" in prompt
 
 
-def test_infer_target_helpers():
-    assert normalize_stm32_target_mcu("stm32f407vg") == "STM32F407VG"
-    assert normalize_target_peripheral("usb_otg_fs") == "USBOTGFS"
+def test_infer_stm32_mcu_family():
     assert infer_stm32_mcu_family("STM32F407VG") == "STM32F4"
     assert infer_stm32_mcu_family("STM32WL55JC") == "STM32WL"
-    assert infer_stm32_driver_prefix("STM32F407VG") == "stm32f4xx"
-    assert infer_stm32_driver_prefix("STM32WL55JC") == "stm32wlxx"
-    assert infer_stm32_device_stem("STM32F407VG") == "STM32F407"
-    assert infer_stm32_header_name("STM32WL55JC") == "stm32wl55xx.h"
+    assert infer_stm32_mcu_family("HIKEY960") == "HIKEY960"
+
+
+def test_normalize_and_tokenize():
+    assert normalize_target_peripheral("usb_otg_fs") == "USBOTGFS"
     assert peripheral_search_tokens("USB_OTG_FS") == ["usb", "otg", "fs", "usbotgfs"]
 
 
-def test_build_asset_requests_are_generic():
-    requests = build_asset_requests(
-        FetchRequest(target_mcu="STM32F407VG", target_peripheral="ETH")
-    )
-    keys = {request.key for request in requests}
-    assert keys == {
-        "reference_manual",
-        "datasheet",
-        "svd",
-        "cmsis_header",
-        "hal_driver",
-        "ll_driver",
-        "rtos_driver",
-    }
-    assert all("stm32f407vg" in request.relative_path for request in requests)
+def test_generic_fetcher_discover_with_no_results():
+    fetcher = GenericDataFetcher(searcher=FakeSearcher([]))
+    candidates = fetcher.discover_candidates("HIKEY960", "GPU")
+    assert candidates == []
 
 
-def test_fetch_data_with_file_search_results(tmp_path):
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    reference_manual = source_dir / "reference_manual.txt"
-    datasheet = source_dir / "datasheet.txt"
-    svd = source_dir / "device.svd"
-    header = source_dir / "stm32f407xx.h"
-    hal_driver = source_dir / "stm32f4xx_hal_eth.c"
-
-    reference_manual.write_text("reference manual", encoding="utf-8")
-    datasheet.write_text("datasheet", encoding="utf-8")
-    svd.write_text("<device></device>", encoding="utf-8")
-    header.write_text("#define STM32F407 1\n", encoding="utf-8")
-    hal_driver.write_text("void HAL_ETH_Init(void) {}\n", encoding="utf-8")
-
-    searcher = FakeSearcher(
-        {
-            "reference manual": str(reference_manual),
-            "datasheet": str(datasheet),
-            ".svd": str(svd),
-            ".h": str(header),
-            " hal ": str(hal_driver),
-        }
-    )
-    fetcher = STM32DataFetcher(searcher=searcher, enable_fallbacks=False)
-    output_dir = tmp_path / "out"
-
-    result = fetcher.fetch_data(
-        target_mcu="STM32F407VG",
-        target_peripheral="ETH",
-        output_dir=output_dir,
-    )
-
-    assert result.success
-    assert Path(result.manifest_path).exists()
-    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
-    assert manifest["target_mcu"] == "STM32F407VG"
-    assert manifest["target_peripheral"] == "ETH"
-
-    bundle = resolve_fetched_input_bundle(
-        target_mcu="STM32F407VG",
-        target_peripheral="ETH",
-        data_dir=output_dir,
-    )
-    assert Path(bundle.header_path).exists()
-    assert Path(bundle.svd_path).exists()
-    assert len(bundle.driver_paths) == 1
-    assert Path(bundle.driver_paths[0]).name == "stm32f4xx_hal_eth.c"
+def test_generic_fetcher_discover_scores_candidates():
+    fake_results = [
+        SearchResult(title="Kirin 960 GPU Mali driver", url="https://github.com/foo/mali.c"),
+        SearchResult(title="Random page", url="https://example.com/page"),
+    ]
+    fetcher = GenericDataFetcher(searcher=FakeSearcher(fake_results))
+    candidates = fetcher.discover_candidates("HIKEY960", "GPU")
+    assert len(candidates) > 0
+    # Higher-scored candidates come first
+    scores = [c.score for c in candidates]
+    assert scores == sorted(scores, reverse=True)
 
 
 def test_resolve_fetched_input_bundle_from_manifest(tmp_path):
     data_dir = tmp_path / "data"
-    target_root = data_dir / "stm32f407vg"
-    (target_root / "docs").mkdir(parents=True)
-    (target_root / "svd").mkdir(parents=True)
-    (target_root / "headers").mkdir(parents=True)
-    (target_root / "drivers" / "hal").mkdir(parents=True)
     (data_dir / "manifests").mkdir(parents=True)
 
-    reference_manual = target_root / "docs" / "reference_manual.txt"
-    svd = target_root / "svd" / "device.svd"
-    header = target_root / "headers" / "stm32f407xx.h"
-    driver = target_root / "drivers" / "hal" / "stm32f4xx_hal_eth.c"
-
-    reference_manual.write_text("manual", encoding="utf-8")
-    svd.write_text("<device></device>", encoding="utf-8")
-    header.write_text("#define STM32F407 1\n", encoding="utf-8")
-    driver.write_text("void HAL_ETH_Init(void) {}\n", encoding="utf-8")
+    svd = data_dir / "device.svd"
+    header = data_dir / "device.h"
+    driver = data_dir / "driver.c"
+    svd.write_text("<device></device>")
+    header.write_text("#define TEST 1\n")
+    driver.write_text("void init(void) {}\n")
 
     manifest = {
-        "target_mcu": "STM32F407VG",
-        "target_peripheral": "ETH",
+        "target_mcu": "TEST_MCU",
+        "target_peripheral": "X",
         "artifacts": [
-            {"category": "docs", "status": "downloaded", "local_path": str(reference_manual)},
             {"category": "svd", "status": "downloaded", "local_path": str(svd)},
             {"category": "headers", "status": "downloaded", "local_path": str(header)},
             {"category": "drivers_hal", "status": "downloaded", "local_path": str(driver)},
         ],
     }
-    manifest_path = data_dir / "manifests" / "stm32f407vg_eth.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path = data_dir / "manifests" / "test_mcu_x.json"
+    manifest_path.write_text(json.dumps(manifest))
 
     bundle = resolve_fetched_input_bundle(
-        target_mcu="STM32F407VG",
-        target_peripheral="ETH",
-        data_dir=data_dir,
+        target_mcu="TEST_MCU", target_peripheral="X", data_dir=data_dir,
     )
-
-    assert bundle.manifest_path == str(manifest_path)
     assert bundle.svd_path == str(svd)
     assert bundle.header_path == str(header)
-    assert bundle.driver_paths == (str(driver),)
-    assert bundle.documentation_paths == (str(reference_manual),)
+    assert len(bundle.driver_paths) == 1
 
 
-def test_single_match_asset_retries_fallback_candidates(tmp_path, monkeypatch):
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    header = source_dir / "stm32f407xx.h"
-    header.write_text("#define STM32F407 1\n", encoding="utf-8")
+def test_resolve_fetched_input_bundle_flat_layout(tmp_path):
+    """Resolves files from generic flat layout: data/{svd,driver,...}/"""
+    data_dir = tmp_path / "data"
+    (data_dir / "svd").mkdir(parents=True)
+    (data_dir / "driver").mkdir(parents=True)
 
-    missing_header = source_dir / "missing.h"
-    fetcher = STM32DataFetcher(searcher=FakeSearcher({}), enable_fallbacks=True)
+    svd = data_dir / "svd" / "test.svd"
+    driver = data_dir / "driver" / "test.c"
+    svd.write_text("<device></device>")
+    driver.write_text("void init(void) {}\n")
 
-    def fake_resolve_fallback_urls(asset):
-        if asset.category == "headers":
-            return [missing_header.as_uri(), header.as_uri()]
-        return []
-
-    monkeypatch.setattr(fetcher, "_resolve_fallback_urls", fake_resolve_fallback_urls)
-    output_dir = tmp_path / "out"
-
-    result = fetcher.fetch_data(
-        target_mcu="STM32F407VG",
-        target_peripheral="ETH",
-        output_dir=output_dir,
+    bundle = resolve_fetched_input_bundle(
+        target_mcu="TEST_MCU", target_peripheral="X", data_dir=data_dir,
     )
-
-    header_artifact = next(
-        artifact for artifact in result.artifacts if artifact.category == "headers"
-    )
-    assert header_artifact.status == "downloaded"
-    assert Path(header_artifact.local_path).name == "stm32f407xx.h"
-
-
-def test_materialize_download_url_normalizes_https_pdf_proxy():
-    url = "https://www.st.com/resource/en/reference_manual/rm0090.pdf?via=search"
-    materialized = _materialize_download_url(url, "docs")
-
-    assert materialized == (
-        "https://r.jina.ai/http://www.st.com/resource/en/reference_manual/rm0090.pdf?via=search"
-    )
-
-
-def test_token_present_uses_word_boundaries_for_short_tokens():
-    assert _token_present("stm32f4xx_hal_eth.c", "eth")
-    assert _token_present("HAL_ETH_Init", "eth")
-    assert not _token_present("update packet length", "eth")
+    assert bundle.svd_path == str(svd)
+    assert len(bundle.driver_paths) == 1

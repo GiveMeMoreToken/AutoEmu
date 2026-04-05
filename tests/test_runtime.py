@@ -1,13 +1,39 @@
-"""Tests for the harness-first agent runtime."""
+"""Tests for the unified agent runtime pipeline and CLI entry point."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from autoemu.agent.orchestrator import FetchResult as AgentFetchResult
-from autoemu.agent.orchestrator import ModelingResult
-from autoemu.agent.runtime import AgentRuntimeConfig, AutoEmuAgentRuntime
+from click.testing import CliRunner
+
+from autoemu.main import cli
+from autoemu.agent.runtime import (
+    AgentRuntimeConfig,
+    AutoEmuAgentRuntime,
+    PipelineProgress,
+    PipelineResult,
+    PIPELINE_PHASES,
+)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def test_cli_version():
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0 and "0.1.0" in result.output
+
+
+def test_cli_help():
+    result = CliRunner().invoke(cli, ["--help"])
+    assert result.exit_code == 0 and "AutoEmu" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Runtime config
+# ---------------------------------------------------------------------------
 
 
 def test_runtime_config_defaults_to_harness(monkeypatch):
@@ -22,123 +48,169 @@ def test_runtime_config_defaults_to_harness(monkeypatch):
     assert config.max_budget_usd == 5.0
 
 
-def test_agent_fetch_reconstructs_manifest(monkeypatch, tmp_path):
-    data_dir = tmp_path / "data"
-    manifest_path = data_dir / "manifests" / "stm32f407vg_eth.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "target_mcu": "STM32F407VG",
-                "target_peripheral": "ETH",
-                "success": True,
-                "artifacts": [],
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_pipeline_phases_defined():
+    assert len(PIPELINE_PHASES) == 4
+    assert "Detecting platform" in PIPELINE_PHASES
+    assert "Fetching input data" in PIPELINE_PHASES
+    assert "Building QEMU peripheral model" in PIPELINE_PHASES
+    assert "Validating generated code" in PIPELINE_PHASES
 
-    async def fake_fetch_input_data(self, task, on_message=None):
-        return AgentFetchResult(
-            target_mcu=task.target_mcu,
-            target_peripheral=task.target_peripheral,
-            success=True,
-            manifest_files=["manifests/stm32f407vg_eth.json"],
-            agent_messages=["fetch complete"],
-        )
 
-    monkeypatch.setattr(
-        "autoemu.agent.runtime.AutoEmuOrchestrator.fetch_input_data",
-        fake_fetch_input_data,
-    )
+def test_pipeline_progress_defaults():
+    p = PipelineProgress()
+    assert p.phase == 0
+    assert p.total_phases == 4
+    assert not p.finished
+    assert not p.error
 
-    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="openai", model="gpt-test"))
-    result = runtime.fetch_data(
+
+def test_pipeline_result_defaults():
+    r = PipelineResult()
+    assert not r.success
+    assert r.error == ""
+    assert r.generated_files == []
+
+
+def test_run_pipeline_calls_phases(monkeypatch, tmp_path):
+    """Verify the unified pipeline calls fetch, build, validate in order."""
+    phases_seen: list[str] = []
+
+    def fake_do_fetch(self, **kwargs):
+        phases_seen.append("fetch")
+        return {"success": True, "artifacts": [], "downloaded": []}
+
+    def fake_do_build(self, **kwargs):
+        phases_seen.append("build")
+        return {"generated_files": ["test.c"], "target_mcu": "STM32F407VG"}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        phases_seen.append("validate")
+        return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
         target_mcu="STM32F407VG",
         target_peripheral="ETH",
-        output_dir=data_dir,
     )
 
-    assert result["target_mcu"] == "STM32F407VG"
-    assert result["execution_backend"] == "openai"
-    assert result["execution_mode"] == "agent"
-    assert result["execution_model"] == "gpt-test"
-    assert result["agent_messages"] == ["fetch complete"]
+    assert result.success
+    assert "stm" in result.platform.lower()
+    assert phases_seen == ["fetch", "build", "validate"]
 
 
-def test_agent_build_reconstructs_generated_bundle(monkeypatch, tmp_path):
-    data_dir = tmp_path / "data"
-    output_dir = tmp_path / "bundle"
-    target_root = data_dir / "stm32f407vg"
-    (target_root / "docs").mkdir(parents=True)
-    (target_root / "svd").mkdir(parents=True)
-    (target_root / "headers").mkdir(parents=True)
-    (target_root / "drivers" / "hal").mkdir(parents=True)
-    (data_dir / "manifests").mkdir(parents=True)
-    output_dir.mkdir(parents=True)
+def test_run_pipeline_emits_progress(monkeypatch):
+    """Verify the on_progress callback is called with phase info."""
+    progress_log: list[PipelineProgress] = []
 
-    reference_manual = target_root / "docs" / "reference_manual.txt"
-    svd = target_root / "svd" / "device.svd"
-    header = target_root / "headers" / "stm32f407xx.h"
-    driver = target_root / "drivers" / "hal" / "stm32f4xx_hal_eth.c"
-    manifest_path = data_dir / "manifests" / "stm32f407vg_eth.json"
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "artifacts": []}
 
-    reference_manual.write_text("manual", encoding="utf-8")
-    svd.write_text("<device></device>", encoding="utf-8")
-    header.write_text("#define STM32F407 1\n", encoding="utf-8")
-    driver.write_text("void HAL_ETH_Init(void) {}\n", encoding="utf-8")
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "target_mcu": "STM32F407VG",
-                "target_peripheral": "ETH",
-                "artifacts": [
-                    {"category": "docs", "status": "downloaded", "local_path": str(reference_manual)},
-                    {"category": "svd", "status": "downloaded", "local_path": str(svd)},
-                    {"category": "headers", "status": "downloaded", "local_path": str(header)},
-                    {"category": "drivers_hal", "status": "downloaded", "local_path": str(driver)},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    def fake_do_build(self, **kwargs):
+        return {"generated_files": []}
 
-    generated_json = {
-        "eth_registers.json": {"ETH": {"name": "ETH", "registers": []}},
-        "eth_state_machine.json": {"model": {"name": "ETH", "states": [], "transitions": []}},
-        "eth_interrupt_model.json": {"model": {"peripheral_name": "ETH", "lines": []}},
-        "eth_dependencies.json": {"model": {"mcu_name": "STM32F4", "edges": []}},
-        "eth_peripheral.json": {"name": "ETH"},
-        "eth_validation.json": {"success": True, "issue_count": 0},
-    }
-    for name, payload in generated_json.items():
-        (output_dir / name).write_text(json.dumps(payload), encoding="utf-8")
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    async def fake_model_peripheral(self, task, on_message=None):
-        return ModelingResult(
-            peripheral_name=task.peripheral_name,
-            success=True,
-            generated_files=[path.name for path in output_dir.iterdir()],
-            agent_messages=["build complete"],
-        )
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
 
-    monkeypatch.setattr(
-        "autoemu.agent.runtime.AutoEmuOrchestrator.model_peripheral",
-        fake_model_peripheral,
-    )
-
-    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="claude"))
-    result = runtime.build_qemu_peripheral(
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
         target_mcu="STM32F407VG",
         target_peripheral="ETH",
-        data_dir=data_dir,
-        output_dir=output_dir,
+        on_progress=progress_log.append,
     )
 
-    assert result["target_mcu"] == "STM32F407VG"
-    assert result["target_peripheral"] == "ETH"
-    assert result["execution_backend"] == "claude"
-    assert result["execution_mode"] == "agent"
-    assert result["validation_report"]["success"] is True
-    assert str(output_dir / "eth_peripheral.json") == result["peripheral_json"]
-    assert result["agent_messages"] == ["build complete"]
+    assert result.success
+    # Should have progress for each phase + finished
+    phase_numbers = [p.phase for p in progress_log if not p.finished]
+    assert 1 in phase_numbers  # detect
+    assert 2 in phase_numbers  # fetch
+    assert 3 in phase_numbers  # build
+    assert 4 in phase_numbers  # validate
+    assert any(p.finished for p in progress_log)
+
+
+def test_run_pipeline_handles_fetch_error(monkeypatch):
+    """Pipeline handles errors gracefully."""
+
+    def fake_do_fetch(self, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+    )
+
+    assert not result.success
+    assert "network down" in result.error
+
+
+def test_run_pipeline_generic_platform_detection(monkeypatch):
+    """Non-STM32 targets get 'generic' platform and per-MCU data dir."""
+    captured: dict = {}
+
+    def fake_do_fetch(self, **kwargs):
+        captured.update(kwargs)
+        return {"success": True, "downloaded": [{"file": "test.c"}]}
+
+    def fake_do_build(self, **kwargs):
+        captured["build_data_dir"] = kwargs.get("data_dir", "")
+        return {"generated_files": []}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="kirin960",
+        target_peripheral="gpu",
+    )
+
+    assert result.success
+    assert "hisilicon" in result.platform.lower()
+    # Data dir should be per-MCU, not "data/generic"
+    assert captured["output_dir"] == "data/kirin960"
+    assert captured["build_data_dir"] == "data/kirin960"
+
+
+def test_run_pipeline_per_mcu_data_dirs(monkeypatch):
+    """Each MCU gets its own data folder."""
+    dirs: list[str] = []
+
+    def fake_do_fetch(self, **kwargs):
+        dirs.append(kwargs.get("output_dir", ""))
+        return {"success": True, "downloaded": []}
+
+    def fake_do_build(self, **kwargs):
+        dirs.append(kwargs.get("data_dir", ""))
+        return {"generated_files": []}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime()
+
+    runtime.run_pipeline(target_mcu="ESP32", target_peripheral="wifi")
+    assert dirs[-2] == "data/esp32"  # fetch
+    assert dirs[-1] == "data/esp32"  # build
+
+    runtime.run_pipeline(target_mcu="STM32F407VG", target_peripheral="ETH")
+    assert dirs[-2] == "data/stm32f407vg"  # fetch
+    assert dirs[-1] == "data/stm32f407vg"  # build

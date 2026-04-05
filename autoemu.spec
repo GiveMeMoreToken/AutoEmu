@@ -10,13 +10,22 @@ a = Analysis(
         'autoemu.agent.backends.claude_backend',
         'autoemu.agent.backends.openai_backend',
         'autoemu.agent.runtime',
+        'autoemu.tui',
+        'autoemu.tui.app',
+        'autoemu.tui.widgets',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # Test / dev dependencies
+        'pytest',
+        'pytest_asyncio',
+        '_pytest',
+        'pyinstaller',
+    ],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 
@@ -29,7 +38,7 @@ exe = EXE(
     name='autoemu',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,

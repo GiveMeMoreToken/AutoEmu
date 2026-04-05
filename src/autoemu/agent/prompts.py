@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-QEMU_TARGET_VERSION = "v9.2.4"
+from autoemu.generators.qemu_generator import QEMU_TARGET_VERSION
 
 SYSTEM_PROMPT = f"""\
 You are AutoEmu, an expert embedded systems engineer and peripheral modeling agent.

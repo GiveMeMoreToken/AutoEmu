@@ -68,6 +68,29 @@ def is_non_mmio_register(register_name: str) -> bool:
     return bool(re.fullmatch(r"DESC\d+", normalized))
 
 
+def snake_case(name: str) -> str:
+    """Convert a CamelCase or mixed name to snake_case."""
+    result: list[str] = []
+    for i, c in enumerate(name):
+        if c.isupper() and i > 0 and not name[i - 1].isupper():
+            result.append("_")
+        result.append(c.lower())
+    return "".join(result).replace("__", "_")
+
+
+def upper_case(name: str) -> str:
+    """Convert name to UPPER_SNAKE_CASE."""
+    return snake_case(name).upper()
+
+
+def normalize_name(name: str) -> str:
+    """Normalize an arbitrary name to a safe lowercase identifier."""
+    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in name)
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("_")
+
+
 def _normalize_token(symbol: str) -> str:
     pieces = re.split(r"[^A-Za-z0-9]+", symbol)
     filtered = [

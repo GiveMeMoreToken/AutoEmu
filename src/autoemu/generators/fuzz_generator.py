@@ -12,20 +12,7 @@ from typing import Any
 
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.register import AccessType
-
-
-def _snake(name: str) -> str:
-    """Convert name to snake_case."""
-    result = []
-    for i, c in enumerate(name):
-        if c.isupper() and i > 0 and not name[i - 1].isupper():
-            result.append("_")
-        result.append(c.lower())
-    return "".join(result).replace("__", "_")
-
-
-def _upper(name: str) -> str:
-    return _snake(name).upper()
+from autoemu.modeling_utils import snake_case as _snake, upper_case as _upper
 
 
 def generate_fuzz_harness(

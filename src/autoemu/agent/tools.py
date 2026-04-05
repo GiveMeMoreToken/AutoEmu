@@ -20,7 +20,7 @@ from autoemu.parsers.driver_parser import (
     analyze_driver_string,
     DriverAnalysis,
 )
-from autoemu.fetchers.stm32 import STM32DataFetcher
+from autoemu.fetchers.generic import GenericDataFetcher
 from autoemu.generators.bundle_generator import generate_model_bundle
 from autoemu.inference.dependency_inference import infer_dependency_graph
 from autoemu.inference.interrupt_inference import infer_interrupt_model
@@ -458,21 +458,23 @@ async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
     try:
         target_mcu = args["target_mcu"]
         target_peripheral = args["target_peripheral"]
-        output_dir = args.get("output_dir", "data/stm32")
-        refresh = bool(args.get("refresh", False))
+        output_dir = args.get("output_dir", "data")
 
-        fetcher = STM32DataFetcher()
-        result = fetcher.fetch_data(
-            target_mcu=target_mcu,
-            target_peripheral=target_peripheral,
-            output_dir=output_dir,
-            refresh=refresh,
+        from autoemu.modeling_utils import normalize_name
+        data_dir = f"{output_dir}/{normalize_name(target_mcu)}"
+
+        fetcher = GenericDataFetcher()
+        candidates = fetcher.discover_candidates(target_mcu, target_peripheral)
+        fetch_result = fetcher.fetch_selected(
+            candidates[:10], data_dir,
+            target_mcu=target_mcu, target_peripheral=target_peripheral,
         )
 
-        lines = [
-            f"Fetched STM32 input data for {target_mcu} / {target_peripheral}",
-        ]
-        lines.extend(result.summary_lines())
+        lines = [f"Fetched input data for {target_mcu} / {target_peripheral}"]
+        for d in fetch_result.downloaded:
+            lines.append(f"  Downloaded: {d['local_path']} ({d['category']})")
+        for e in fetch_result.errors:
+            lines.append(f"  Error: {e}")
         return _ok("\n".join(lines))
     except Exception as e:
         return _err(f"STM32 data fetch failed: {e}")

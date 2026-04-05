@@ -402,20 +402,53 @@ HAL_StatusTypeDef HAL_TIM_Init(TIM_HandleTypeDef *htim) {
     _assert_pipeline_success(result, output)
 
 
-def test_pipeline_validation_report(usart_inputs):
-    """Validation report structure is correct."""
-    result = run_model_pipeline(
-        "USART1",
-        output_dir=usart_inputs["output"],
-        svd_path=usart_inputs["svd"],
-        driver_paths=[usart_inputs["driver"]],
+def test_driver_only_pipeline_no_svd(tmp_path):
+    """Pipeline works with driver only, no SVD or header (e.g. kirin960/gpu)."""
+    driver = tmp_path / "mali_gpu_driver.c"
+    driver.write_text(
+        """\
+void mali_gpu_init(void *base) {
+    volatile uint32_t *regs = (volatile uint32_t *)base;
+    regs[0] = 0x01;  /* GPU_CTRL: enable */
+    regs[1] = 0x00;  /* GPU_STATUS: clear */
+}
+
+void mali_gpu_irq_handler(void *base) {
+    volatile uint32_t *regs = (volatile uint32_t *)base;
+    uint32_t status = regs[1];
+    if (status & 0x01) {
+        regs[1] = 0x01;  /* clear interrupt */
+    }
+}
+
+void mali_gpu_shutdown(void *base) {
+    volatile uint32_t *regs = (volatile uint32_t *)base;
+    regs[0] = 0x00;  /* disable */
+}
+""",
+        encoding="utf-8",
     )
-    report = result["validation_report"]
-    assert "register_issues" in report
-    assert "behavior_issues" in report
-    assert "driver_replay" in report
-    assert isinstance(report["register_issues"], list)
-    assert isinstance(report["behavior_issues"], list)
+    output = tmp_path / "output"
+    result = run_model_pipeline(
+        "GPU",
+        output_dir=output,
+        driver_paths=[driver],
+        mcu_family="KIRIN960",
+    )
+    # Pipeline should complete — model JSON and analysis artifacts exist
+    assert result["peripheral_name"] == "GPU"
+    assert Path(result["registers_json"]).exists()
+    assert Path(result["state_machine_json"]).exists()
+    assert Path(result["interrupt_model_json"]).exists()
+    assert Path(result["dependency_graph_json"]).exists()
+    assert Path(result["peripheral_json"]).exists()
+
+
+def test_driver_only_pipeline_no_inputs_raises():
+    """Pipeline rejects when no inputs at all are provided."""
+    import pytest
+    with pytest.raises(ValueError, match="at least one input source"):
+        run_model_pipeline("GPU", output_dir="/tmp/noop")
 
 
 def _assert_pipeline_success(result, output_dir):

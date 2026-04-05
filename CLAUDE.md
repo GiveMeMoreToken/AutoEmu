@@ -17,21 +17,17 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"` — async test functions
 
 ## CLI
 
-The `autoemu` CLI (Click-based, entry point in `src/autoemu/main.py`) has these commands:
+Running `autoemu` launches an interactive TUI (Textual-based). The user provides only a **target board/MCU** and a **target peripheral** — everything else is auto-inferred.
 
-- `autoemu fetch-data --target-mcu MCU --target-peripheral PERIPH` — Fetch the input bundle for one target.
-- `autoemu build-qemu-peripheral --target-mcu MCU --target-peripheral PERIPH` — Run the full modeling pipeline from fetched data and emit QEMU-ready artifacts.
+The unified pipeline runs: **detect platform → fetch data → build QEMU model → validate**.
 
-Both commands flow through `src/autoemu/agent/runtime.py`. The default backend is the local harness runtime. Set `AUTOEMU_AGENT_BACKEND=claude` or `AUTOEMU_AGENT_BACKEND=openai` to route the same workflow through an external agent backend.
+The entry point is `src/autoemu/main.py` which calls the TUI at `src/autoemu/tui/app.py`. The pipeline logic is in `src/autoemu/agent/runtime.py` (`AutoEmuAgentRuntime.run_pipeline()`).
 
-The binary-first workflow is:
-1. Build `dist/autoemu` with PyInstaller.
-2. Run `fetch-data`.
-3. Run `build-qemu-peripheral`.
+Set `AUTOEMU_AGENT_BACKEND=claude` or `AUTOEMU_AGENT_BACKEND=openai` to route the workflow through an external LLM backend instead of the local harness.
 
 ## Architecture
 
-**Public flow:** CLI → agent runtime (`runtime.py`) → harness backend or LLM orchestrator → deterministic tools/pipeline → QEMU generator → validators
+**Public flow:** TUI → `run_pipeline()` in `runtime.py` → platform detection → fetcher → modeling pipeline → compile validation → results in TUI
 
 ### Models (`src/autoemu/models/`)
 Pydantic v2 models forming the core data layer. `Peripheral` is the top-level model containing a `RegisterBlock` (with `Register`/`BitField`), optional `StateMachine`, `InterruptModel`, and `DependencyGraph`. Register access semantics (W1C, RC_W1, W1S, etc.) are enforced in `Register.apply_write()`/`apply_read()`.
@@ -45,23 +41,33 @@ Three input parsers, all returning model objects:
 ### Agent (`src/autoemu/agent/`)
 Abstract backend pattern with `AgentBackend` base class (`backend.py`). Two implementations in `backends/`: `ClaudeBackend` (claude-agent-sdk) and `OpenAIAgentsBackend` (openai-agents). Factory: `create_backend("claude"|"openai")`.
 
-`tools.py` defines the backend-agnostic `ToolSpec` registry. `runtime.py` is the harness-first entrypoint used by the CLI. `orchestrator.py` runs the 6-phase prompt-driven pipeline when an external LLM backend is selected. Events stream as `AgentEvent` (text, tool_call, complete, error).
+`tools.py` defines the backend-agnostic `ToolSpec` registry. `runtime.py` contains the unified `AutoEmuAgentRuntime.run_pipeline()` entry point. `orchestrator.py` runs the 6-phase prompt-driven pipeline when an external LLM backend is selected.
 
-The STM32 fetch flow also runs through the agent backend. It uses the same tool registry plus repository-local constraints from `AGENTS.md`.
+### Platforms (`src/autoemu/platforms/`)
+Platform abstraction with registry (`get_platform()`, `detect_platform()`). Three plugins:
+- `stm32` — STM32 family MCUs
+- `mips` — MIPS SoCs (PDF, device tree, kernel driver parsers)
+- `generic` — Any other MCU via web search
+
+### Fetchers (`src/autoemu/fetchers/`)
+- `stm32.py` — STM32 data fetcher with DuckDuckGo search + GitHub API + retry/backoff
+- `generic.py` — Generic fetcher for any MCU using parallel web search and scoring
+- `base.py` — `BaseFetcher` ABC with shared download/cache/SHA256 logic
+
+### TUI (`src/autoemu/tui/`)
+Textual-based interactive terminal UI. Single screen with MCU/peripheral inputs, pipeline phase indicators, and a scrolling log panel.
 
 ### Generators (`src/autoemu/generators/`)
 - `qemu_generator` — Produces `.h`, `.c`, `meson.build`, QTest harness, and model JSON per peripheral
 - `test_generator` — Produces standalone C test harnesses for reset values, W1C behavior, RO protection, field isolation
+- `fuzz_generator` — Produces AFL/libFuzzer harnesses targeting MemoryRegionOps
 
 ### Validators (`src/autoemu/validators/`)
 - `register_validator` — Structural checks (overlapping offsets/fields, duplicate names, access conflicts)
 - `behavior_validator` — Cross-validates model against driver analysis (missing registers, ISR mismatches)
+- `compile_validator` — `-fsyntax-only` compilation check and `meson.build` validation
+- `security_validator` — DMA boundary, privilege escalation, interrupt safety checks
 - `driver_replay` — Replays register write/read sequences against the model
-
-## Probe Harnesses
-
-- `scripts/run_stm32_guest_firmware.sh` builds and runs the bare-metal probe firmware.
-- `scripts/run_stm32_linux_probe_qemu.sh` builds the Buildroot rootfs and Linux kernel as needed, then boots to a BusyBox shell on `ttyAMA0`.
 
 ## QEMU Code Generation Constraints
 
@@ -79,3 +85,4 @@ All generated C code targets **QEMU v9.2.4** specifically. Key API choices:
 - Pydantic v2 API throughout (`model_validate()`, `model_dump()`, not v1 `.dict()`/`.parse_obj()`)
 - Tool handlers return `dict[str, Any]` with a consistent shape (success/error keys)
 - Generated output goes to `output/` by default. External source trees live under `build/*-src/`.
+- Shared utilities in `modeling_utils.py`: `snake_case()`, `upper_case()`, `normalize_name()`

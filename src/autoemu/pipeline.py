@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from autoemu.fetchers.stm32 import infer_stm32_mcu_family, resolve_fetched_input_bundle
+from autoemu.fetchers.generic import infer_stm32_mcu_family, resolve_fetched_input_bundle
 from autoemu.generators.bundle_generator import generate_model_bundle
 from autoemu.inference.dependency_inference import infer_dependency_graph
 from autoemu.inference.interrupt_inference import infer_interrupt_model
@@ -34,14 +34,15 @@ def run_model_pipeline(
     driver_path_list = [str(path) for path in driver_paths if str(path)]
     doc_path_list = [str(path) for path in documentation_paths if str(path)]
 
-    if not svd_path and not header_path:
-        raise ValueError("Provide at least one register input source with --svd and/or --header.")
-    if not driver_path_list:
-        raise ValueError("Provide at least one driver source file.")
+    if not svd_path and not header_path and not driver_path_list:
+        raise ValueError(
+            "Provide at least one input source: SVD, header, or driver file."
+        )
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    # Register extraction — may yield empty blocks when no SVD/header available
     register_blocks, extraction_warnings = extract_register_blocks(
         svd_path=str(svd_path or ""),
         header_path=str(header_path or ""),
@@ -138,15 +139,10 @@ def run_target_model_pipeline(
         data_dir=data_dir,
     )
 
-    if not inputs.svd_path and not inputs.header_path:
+    if not inputs.svd_path and not inputs.header_path and not inputs.driver_paths:
         raise ValueError(
-            f"No SVD or header input found for {target_mcu} / {target_peripheral}. "
-            f"Run fetch-data first or provide fetched register sources under {data_dir}."
-        )
-    if not inputs.driver_paths:
-        raise ValueError(
-            f"No driver sources found for {target_mcu} / {target_peripheral}. "
-            f"Run fetch-data first or provide fetched drivers under {data_dir}."
+            f"No inputs found for {target_mcu} / {target_peripheral}. "
+            f"No SVD, headers, or drivers under {data_dir}."
         )
 
     result = run_model_pipeline(
@@ -314,11 +310,7 @@ def _load_documentation_text(paths: list[str]) -> str:
     return "\n\n".join(texts)
 
 
-def _snake(name: str) -> str:
-    normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in name)
-    while "__" in normalized:
-        normalized = normalized.replace("__", "_")
-    return normalized.strip("_")
+from autoemu.modeling_utils import normalize_name as _snake  # noqa: E402
 
 
 def _unique_in_order(values: list[str]) -> list[str]:

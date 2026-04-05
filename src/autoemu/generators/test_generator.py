@@ -10,19 +10,7 @@ from pathlib import Path
 
 from autoemu.models.register import AccessType
 from autoemu.models.peripheral import Peripheral
-
-
-def _snake(name: str) -> str:
-    result = []
-    for i, c in enumerate(name):
-        if c.isupper() and i > 0 and not name[i - 1].isupper():
-            result.append("_")
-        result.append(c.lower())
-    return "".join(result).replace("__", "_")
-
-
-def _upper(name: str) -> str:
-    return _snake(name).upper()
+from autoemu.modeling_utils import snake_case as _snake, upper_case as _upper
 
 
 def generate_test_harness(
@@ -169,7 +157,9 @@ def generate_test_harness(
     lines.append(f"    return 0;")
     lines.append(f"}}")
 
-    test_path = output_dir / f"test_stm32_{snake}.c"
+    from autoemu.generators.qemu_generator import _device_prefix
+    pfx = _device_prefix(peripheral)
+    test_path = output_dir / f"test_{pfx}_{snake}.c"
     test_path.write_text("\n".join(lines), encoding="utf-8")
     files.append(str(test_path))
 

@@ -18,6 +18,7 @@ dependencies = [
     "jinja2>=3.1",
     "rich>=13.0",
     "click>=8.1",
+    "textual>=0.50",
 ]
 
 [project.optional-dependencies]

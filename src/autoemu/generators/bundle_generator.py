@@ -404,10 +404,4 @@ def _parse_int(text: str) -> int | None:
     return None
 
 
-def _snake(name: str) -> str:
-    result = []
-    for index, char in enumerate(name):
-        if char.isupper() and index > 0 and not name[index - 1].isupper():
-            result.append("_")
-        result.append(char.lower())
-    return "".join(result).replace("__", "_")
+from autoemu.modeling_utils import snake_case as _snake  # noqa: E402

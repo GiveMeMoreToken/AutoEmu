@@ -21,6 +21,7 @@ def _make_test_peripheral() -> Peripheral:
         name="TEST_PERIPH",
         peripheral_type=PeripheralType.GENERIC,
         base_address=0x40000000,
+        mcu_family="STM32F4",
         register_block=RegisterBlock(
             name="TEST_PERIPH",
             registers=[
@@ -87,11 +88,11 @@ class TestQEMUGenerator:
             assert len(files) == 5  # .h, .c, meson.build, qtest .c, .json
 
             names = [Path(f).name for f in files]
-            assert "stm32_test_periph.h" in names
-            assert "stm32_test_periph.c" in names
+            assert "stm32f4_test_periph.h" in names
+            assert "stm32f4_test_periph.c" in names
             assert "meson.build" in names
-            assert "qtest_stm32_test_periph.c" in names
-            assert "stm32_test_periph_model.json" in names
+            assert "qtest_stm32f4_test_periph.c" in names
+            assert "stm32f4_test_periph_model.json" in names
 
     def test_header_content(self):
         periph = _make_test_peripheral()
@@ -101,7 +102,7 @@ class TestQEMUGenerator:
             content = Path(header).read_text()
 
             assert "QEMU v9.2.4" in content
-            assert "TYPE_STM32_TEST_PERIPH" in content
+            assert "TYPE_STM32F4_TEST_PERIPH" in content
             assert "TEST_PERIPH_CR_OFFSET" in content
             assert "TEST_PERIPH_SR_OFFSET" in content
             assert "MemoryRegion mmio" in content
@@ -112,13 +113,13 @@ class TestQEMUGenerator:
         periph = _make_test_peripheral()
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_peripheral_code(periph, tmpdir)
-            source = [f for f in files if Path(f).name == "stm32_test_periph.c"][0]
+            source = [f for f in files if Path(f).name == "stm32f4_test_periph.c"][0]
             content = Path(source).read_text()
 
             # Core functions present
-            assert "stm32_test_periph_read" in content
-            assert "stm32_test_periph_write" in content
-            assert "stm32_test_periph_reset" in content
+            assert "stm32f4_test_periph_read" in content
+            assert "stm32f4_test_periph_write" in content
+            assert "stm32f4_test_periph_reset" in content
             assert "MemoryRegionOps" in content
             assert "type_register_static" in content
             assert "Write-1-to-clear" in content
@@ -142,8 +143,8 @@ class TestQEMUGenerator:
             content = Path(meson).read_text()
 
             assert "system_ss.add" in content
-            assert "CONFIG_STM32_TEST_PERIPH" in content
-            assert "stm32_test_periph.c" in content
+            assert "CONFIG_STM32F4_TEST_PERIPH" in content
+            assert "stm32f4_test_periph.c" in content
             assert QEMU_TARGET_VERSION in content
 
     def test_qtest_content(self):
@@ -174,7 +175,7 @@ class TestQEMUGenerator:
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_peripheral_code(periph, tmpdir)
-            source = [f for f in files if Path(f).name == "stm32_test_periph.c"][0]
+            source = [f for f in files if Path(f).name == "stm32f4_test_periph.c"][0]
             content = Path(source).read_text()
 
             assert "(s->sr & (1U << 1))" in content

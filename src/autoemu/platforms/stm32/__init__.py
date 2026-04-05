@@ -12,11 +12,6 @@ from autoemu.platforms.base import (
 from autoemu.models.register import RegisterBlock
 from autoemu.parsers.driver_parser import DriverAnalysis, analyze_driver_file
 from autoemu.parsers.register_extractor import extract_register_blocks
-from autoemu.fetchers.stm32 import (
-    FetchRequest,
-    build_asset_requests,
-    infer_stm32_mcu_family,
-)
 from autoemu.pipeline import merge_driver_analyses
 
 
@@ -24,20 +19,15 @@ class STM32Platform(Platform):
     name = "stm32"
 
     def discover_inputs(self, mcu: str, peripheral: str) -> list[AssetDescriptor]:
-        request = FetchRequest(target_mcu=mcu, target_peripheral=peripheral)
-        assets = build_asset_requests(request)
         return [
-            AssetDescriptor(
-                key=a.key,
-                category=a.category,
-                description=a.description,
-                queries=a.queries,
-                preferred_domains=a.preferred_domains,
-                required=a.required,
-                max_matches=a.max_matches,
-                file_extensions=a.file_extensions,
-            )
-            for a in assets
+            AssetDescriptor(key="svd", category="svd", description="CMSIS-SVD file",
+                            file_extensions=(".svd",)),
+            AssetDescriptor(key="header", category="headers", description="CMSIS device header",
+                            file_extensions=(".h",)),
+            AssetDescriptor(key="driver", category="drivers", description="HAL/LL driver sources",
+                            file_extensions=(".c",), max_matches=5),
+            AssetDescriptor(key="docs", category="docs", description="Reference manual",
+                            file_extensions=(".pdf", ".txt")),
         ]
 
     def parse_registers(self, bundle: InputBundle) -> dict[str, RegisterBlock]:

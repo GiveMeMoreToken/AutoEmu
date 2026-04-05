@@ -1,0 +1,17 @@
+# AutoEmu configuration file
+# Copy to .autoemu.toml in your working directory.
+# Values here override environment variables.
+
+[agent]
+# Backend: "harness" (default, no AI), "claude", or "openai"
+backend = "harness"
+
+# LLM model override (optional, backend-specific)
+# model = "claude-sonnet-4-20250514"
+
+# Maximum spend per pipeline run (USD)
+# max_budget_usd = 5.0
+
+# API keys (alternatively set ANTHROPIC_API_KEY / OPENAI_API_KEY env vars)
+# anthropic_api_key = "sk-ant-..."
+# openai_api_key = "sk-..."
