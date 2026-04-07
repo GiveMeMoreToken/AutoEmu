@@ -40,8 +40,10 @@ def test_runtime_config_defaults_to_harness(monkeypatch):
     monkeypatch.delenv("AUTOEMU_AGENT_BACKEND", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MODEL", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MAX_BUDGET_USD", raising=False)
+    # Prevent .autoemu.toml in CWD from affecting this test
+    monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
 
-    config = AgentRuntimeConfig.from_env()
+    config = AgentRuntimeConfig.load()
 
     assert config.backend == "harness"
     assert config.model is None

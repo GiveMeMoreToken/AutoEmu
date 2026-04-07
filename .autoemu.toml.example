@@ -15,3 +15,8 @@ backend = "harness"
 # API keys (alternatively set ANTHROPIC_API_KEY / OPENAI_API_KEY env vars)
 # anthropic_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
+
+# Base URLs for API proxies or self-hosted endpoints
+# (alternatively set ANTHROPIC_BASE_URL / OPENAI_BASE_URL env vars)
+# anthropic_base_url = "https://api.anthropic.com"
+# openai_base_url = "https://api.openai.com/v1"

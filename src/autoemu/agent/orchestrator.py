@@ -228,22 +228,30 @@ class AutoEmuOrchestrator:
         self,
         task: ModelingTask,
         on_message: Any | None = None,
+        on_event: Any | None = None,
     ) -> ModelingResult:
-        """Run the full modeling pipeline for a peripheral."""
+        """Run the full modeling pipeline for a peripheral.
+
+        *on_event(event_type, phase, detail)* is called for every agent
+        event so the caller can render progress.
+        """
         result = ModelingResult(peripheral_name=task.peripheral_name)
         total_cost = 0.0
 
+        def _emit(etype: str, phase: str, detail: str) -> None:
+            if on_event:
+                on_event(etype, phase, detail)
+
         try:
             for phase in task.phases:
-                if self.verbose and on_message:
-                    on_message(phase, f"Starting phase: {phase}")
-
                 builder = _PHASE_PROMPT_BUILDERS.get(phase)
                 if not builder:
                     continue
 
                 prompt = builder(task)
                 phase_text: list[str] = []
+
+                _emit("phase_start", phase, prompt[:300])
 
                 async for event in self._backend.run(
                     prompt,
@@ -257,19 +265,20 @@ class AutoEmuOrchestrator:
                         phase_text.append(event.text)
                         if on_message:
                             on_message(phase, event.text)
+                        _emit("text", phase, event.text)
                     elif event.type == "tool_call":
-                        if self.verbose and on_message:
-                            on_message(
-                                phase,
-                                f"[tool] {event.tool_name}({event.tool_input[:200]}...)"
-                            )
+                        _emit("tool_call", phase,
+                              f"{event.tool_name}({event.tool_input[:200]})")
                     elif event.type == "error":
                         result.error = event.text
                         total_cost += event.cost_usd
                         result.total_cost_usd = total_cost
+                        _emit("error", phase, event.text)
                         return result
                     elif event.type == "complete":
                         total_cost += event.cost_usd
+                        _emit("phase_done", phase,
+                              f"${event.cost_usd:.4f}")
 
                 result.phases_completed.append(phase)
                 result.agent_messages.extend(phase_text)
@@ -338,6 +347,7 @@ class AutoEmuOrchestrator:
         self,
         task: FetchTask,
         on_message: Any | None = None,
+        on_event: Any | None = None,
     ) -> FetchResult:
         """Run the input-data collection flow through the agent backend."""
         result = FetchResult(
@@ -346,9 +356,14 @@ class AutoEmuOrchestrator:
         )
         total_cost = 0.0
 
+        def _emit(etype: str, detail: str) -> None:
+            if on_event:
+                on_event(etype, "fetch", detail)
+
         try:
             prompt = _build_fetch_prompt(task)
             phase_text: list[str] = []
+            _emit("phase_start", prompt[:300])
 
             async for event in self._backend.run(
                 prompt,
@@ -362,19 +377,19 @@ class AutoEmuOrchestrator:
                     phase_text.append(event.text)
                     if on_message:
                         on_message("fetch", event.text)
+                    _emit("text", event.text)
                 elif event.type == "tool_call":
-                    if self.verbose and on_message:
-                        on_message(
-                            "fetch",
-                            f"[tool] {event.tool_name}({event.tool_input[:200]}...)",
-                        )
+                    _emit("tool_call",
+                          f"{event.tool_name}({event.tool_input[:200]})")
                 elif event.type == "error":
                     result.error = event.text
                     total_cost += event.cost_usd
                     result.total_cost_usd = total_cost
+                    _emit("error", event.text)
                     return result
                 elif event.type == "complete":
                     total_cost += event.cost_usd
+                    _emit("phase_done", f"${event.cost_usd:.4f}")
 
             result.agent_messages.extend(phase_text)
         except Exception as e:

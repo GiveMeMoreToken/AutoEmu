@@ -6,7 +6,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Button, Footer, Header, Input, Label, Static
+from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from autoemu.tui.widgets import LogPanel, PipelinePhaseList
 
@@ -18,6 +18,128 @@ BANNER = (
     r" / ___ \ |_| | || (_) | |___| | | | | | |_| |" "\n"
     r"/_/   \_\__,_|\__\___/|_____|_| |_| |_|\__,_|"
 )
+
+
+class SettingsScreen(Container):
+    """Inline settings panel for backend configuration."""
+
+    DEFAULT_CSS = """
+    SettingsScreen {
+        display: none;
+        layout: vertical;
+        height: auto;
+        padding: 1 4;
+        border: solid $accent;
+        margin: 0 4;
+        background: $surface-darken-1;
+    }
+
+    SettingsScreen.visible {
+        display: block;
+    }
+
+    SettingsScreen .settings-row {
+        height: auto;
+        margin-bottom: 1;
+        align: left middle;
+    }
+
+    SettingsScreen .settings-row Label {
+        width: 22;
+        padding: 1 1 0 0;
+    }
+
+    SettingsScreen .settings-row Input {
+        width: 1fr;
+    }
+
+    SettingsScreen .settings-row Select {
+        width: 1fr;
+    }
+
+    SettingsScreen #settings-buttons {
+        height: auto;
+        align: left middle;
+        padding-top: 1;
+    }
+
+    SettingsScreen #settings-buttons Button {
+        margin-right: 2;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("[bold]Backend Settings[/]")
+        with Horizontal(classes="settings-row"):
+            yield Label("Backend:")
+            yield Select(
+                [("Harness (local)", "harness"), ("Claude", "claude"), ("OpenAI", "openai")],
+                value="harness",
+                id="cfg-backend",
+            )
+        with Horizontal(classes="settings-row"):
+            yield Label("Model:")
+            yield Input(placeholder="(auto)", id="cfg-model")
+        with Horizontal(classes="settings-row"):
+            yield Label("OpenAI API Key:")
+            yield Input(placeholder="sk-...", password=True, id="cfg-openai-key")
+        with Horizontal(classes="settings-row"):
+            yield Label("OpenAI Base URL:")
+            yield Input(placeholder="https://api.openai.com/v1", id="cfg-openai-base")
+        with Horizontal(classes="settings-row"):
+            yield Label("Anthropic API Key:")
+            yield Input(placeholder="sk-ant-...", password=True, id="cfg-anthropic-key")
+        with Horizontal(classes="settings-row"):
+            yield Label("Anthropic Base URL:")
+            yield Input(placeholder="https://api.anthropic.com", id="cfg-anthropic-base")
+        with Horizontal(classes="settings-row"):
+            yield Label("Max Budget (USD):")
+            yield Input(placeholder="5.0", id="cfg-budget")
+        with Horizontal(id="settings-buttons"):
+            yield Button("Save", variant="primary", id="btn-save-cfg")
+            yield Button("Close", variant="default", id="btn-close-cfg")
+
+    def load_from_config(self) -> None:
+        """Populate fields from the current runtime config."""
+        from autoemu.agent.runtime import AgentRuntimeConfig
+        cfg = AgentRuntimeConfig.load()
+
+        self.query_one("#cfg-backend", Select).value = cfg.backend
+        self.query_one("#cfg-model", Input).value = cfg.model or ""
+        self.query_one("#cfg-openai-key", Input).value = cfg.openai_api_key
+        self.query_one("#cfg-openai-base", Input).value = cfg.openai_base_url
+        self.query_one("#cfg-anthropic-key", Input).value = cfg.anthropic_api_key
+        self.query_one("#cfg-anthropic-base", Input).value = cfg.anthropic_base_url
+        self.query_one("#cfg-budget", Input).value = str(cfg.max_budget_usd)
+
+    def save_to_file(self) -> None:
+        """Write current field values to .autoemu.toml."""
+        from pathlib import Path
+
+        backend = self.query_one("#cfg-backend", Select).value
+        model = self.query_one("#cfg-model", Input).value.strip()
+        openai_key = self.query_one("#cfg-openai-key", Input).value.strip()
+        openai_base = self.query_one("#cfg-openai-base", Input).value.strip()
+        anthropic_key = self.query_one("#cfg-anthropic-key", Input).value.strip()
+        anthropic_base = self.query_one("#cfg-anthropic-base", Input).value.strip()
+        budget = self.query_one("#cfg-budget", Input).value.strip()
+
+        lines = ["# AutoEmu configuration (managed by TUI)\n", "\n", "[agent]\n"]
+        lines.append(f'backend = "{backend}"\n')
+        if model:
+            lines.append(f'model = "{model}"\n')
+        if budget:
+            lines.append(f"max_budget_usd = {budget}\n")
+        if openai_key:
+            lines.append(f'openai_api_key = "{openai_key}"\n')
+        if openai_base:
+            lines.append(f'openai_base_url = "{openai_base}"\n')
+        if anthropic_key:
+            lines.append(f'anthropic_api_key = "{anthropic_key}"\n')
+        if anthropic_base:
+            lines.append(f'anthropic_base_url = "{anthropic_base}"\n')
+
+        Path(".autoemu.toml").write_text("".join(lines), encoding="utf-8")
 
 
 class AutoEmuApp(App):
@@ -43,7 +165,18 @@ class AutoEmuApp(App):
     #subtitle {
         text-align: center;
         color: $text-muted;
-        padding: 0 0 1 0;
+        padding: 0 0 0 0;
+        width: 1fr;
+    }
+
+    #backend-bar {
+        height: auto;
+        padding: 0 4 1 4;
+        align: center middle;
+    }
+
+    #backend-label {
+        text-align: center;
         width: 1fr;
     }
 
@@ -78,6 +211,12 @@ class AutoEmuApp(App):
         min-width: 20;
     }
 
+    #settings-bar {
+        height: auto;
+        padding: 0 4;
+        align: center middle;
+    }
+
     #pipeline-area {
         height: auto;
         padding: 0 4;
@@ -92,12 +231,18 @@ class AutoEmuApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("ctrl+r", "run_pipeline", "Run", show=True),
+        Binding("ctrl+s", "toggle_settings", "Settings", show=True),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(BANNER, id="banner")
         yield Static("Automated QEMU peripheral model generation for any MCU", id="subtitle")
+
+        with Container(id="backend-bar"):
+            yield Static("", id="backend-label")
+
+        yield SettingsScreen(id="settings-panel")
 
         with Vertical(id="form-area"):
             with Horizontal(classes="form-row"):
@@ -114,11 +259,9 @@ class AutoEmuApp(App):
                 )
 
         with Container(id="action-bar"):
-            yield Button(
-                "Run Pipeline  [dim](Ctrl+R)[/]",
-                variant="primary",
-                id="btn-run",
-            )
+            yield Button("Run Pipeline  [dim](Ctrl+R)[/]", variant="primary", id="btn-run")
+        with Container(id="settings-bar"):
+            yield Button("Settings  [dim](Ctrl+S)[/]", variant="success", id="btn-settings")
 
         with Container(id="pipeline-area"):
             yield PipelinePhaseList(id="phase-list")
@@ -129,19 +272,58 @@ class AutoEmuApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._refresh_backend_label()
         log = self.query_one("#log", LogPanel)
         log.log_info(
             "Enter a [bold]target board[/] and [bold]peripheral[/], "
             "then press [bold]Run Pipeline[/]."
         )
-        log.log_info(
-            "AutoEmu will automatically detect the platform, fetch data, "
-            "build a QEMU model, and validate the output."
-        )
+
+    def _refresh_backend_label(self) -> None:
+        from autoemu.agent.runtime import AgentRuntimeConfig
+        cfg = AgentRuntimeConfig.load()
+        backend = cfg.backend
+        model = cfg.model or "default"
+        if backend == "harness":
+            text = "[dim]Backend:[/] [bold]harness[/] (local, no AI)"
+        elif backend == "claude":
+            base = f" @ {cfg.anthropic_base_url}" if cfg.anthropic_base_url else ""
+            text = f"[dim]Backend:[/] [bold cyan]Claude[/] model={model}{base}"
+        elif backend == "openai":
+            base = f" @ {cfg.openai_base_url}" if cfg.openai_base_url else ""
+            text = f"[dim]Backend:[/] [bold green]OpenAI[/] model={model}{base}"
+        else:
+            text = f"[dim]Backend:[/] {backend}"
+        self.query_one("#backend-label", Static).update(text)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-run":
             self.action_run_pipeline()
+        elif event.button.id == "btn-settings":
+            self.action_toggle_settings()
+        elif event.button.id == "btn-save-cfg":
+            self._save_settings()
+        elif event.button.id == "btn-close-cfg":
+            self.action_toggle_settings()
+
+    def action_toggle_settings(self) -> None:
+        panel = self.query_one("#settings-panel", SettingsScreen)
+        if panel.has_class("visible"):
+            panel.remove_class("visible")
+        else:
+            panel.load_from_config()
+            panel.add_class("visible")
+
+    def _save_settings(self) -> None:
+        panel = self.query_one("#settings-panel", SettingsScreen)
+        log = self.query_one("#log", LogPanel)
+        try:
+            panel.save_to_file()
+            log.log_success("Settings saved to .autoemu.toml")
+            panel.remove_class("visible")
+            self._refresh_backend_label()
+        except Exception as exc:
+            log.log_error(f"Failed to save settings: {exc}")
 
     def action_run_pipeline(self) -> None:
         mcu = self.query_one("#input-mcu", Input).value.strip()
@@ -152,7 +334,6 @@ class AutoEmuApp(App):
             log.log_error("Please fill in both [bold]Target Board[/] and [bold]Target Peripheral[/].")
             return
 
-        # Disable button to prevent double-run
         btn = self.query_one("#btn-run", Button)
         btn.disabled = True
         self._run_pipeline_worker(mcu, periph)
@@ -164,7 +345,6 @@ class AutoEmuApp(App):
         log = self.query_one("#log", LogPanel)
         phases = self.query_one("#phase-list", PipelinePhaseList)
 
-        # Reset phase display
         self.app.call_from_thread(phases.reset_phases)
 
         log.log_info(f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
@@ -177,7 +357,7 @@ class AutoEmuApp(App):
                 return
             self.app.call_from_thread(phases.set_phase_running, p.phase)
             if p.detail:
-                log.log_info(f"[Phase {p.phase}] {p.detail}")
+                log.log_kind(p.detail, p.kind)
 
         try:
             runtime = AutoEmuAgentRuntime()
@@ -187,11 +367,9 @@ class AutoEmuApp(App):
                 on_progress=on_progress,
             )
 
-            # Mark phases done/errored based on actual results
             if result.success:
-                for i in range(1, 4):  # phases 1-3 always done if success
+                for i in range(1, 4):
                     self.app.call_from_thread(phases.set_phase_done, i)
-                # Phase 4 reflects validation outcome
                 val_ok = result.validation_result.get("success", True)
                 if val_ok:
                     self.app.call_from_thread(phases.set_phase_done, 4)
@@ -201,7 +379,6 @@ class AutoEmuApp(App):
             else:
                 log.log_error(f"Pipeline failed: {result.error}")
 
-            # Show results
             if result.platform:
                 log.log_info(f"Platform: [bold]{result.platform}[/]")
 
@@ -212,7 +389,6 @@ class AutoEmuApp(App):
                 if len(result.generated_files) > 20:
                     log.write(f"  ... and {len(result.generated_files) - 20} more")
 
-            # Show validation results
             val = result.validation_result
             if val:
                 checked = val.get("files_checked", 0)

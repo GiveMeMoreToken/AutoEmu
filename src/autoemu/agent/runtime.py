@@ -48,6 +48,9 @@ class PipelineProgress:
     detail: str = ""
     finished: bool = False
     error: str = ""
+    # kind: "info" | "agent_thinking" | "agent_tool" | "agent_text" |
+    #       "download" | "search" | "compile" | "warn" | "fail"
+    kind: str = "info"
 
 
 @dataclass
@@ -92,7 +95,9 @@ class AgentRuntimeConfig:
     model: str | None = None
     max_budget_usd: float = 5.0
     anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
     openai_api_key: str = ""
+    openai_base_url: str = ""
 
     @classmethod
     def load(cls) -> AgentRuntimeConfig:
@@ -127,23 +132,37 @@ class AgentRuntimeConfig:
             agent_cfg.get("anthropic_api_key")
             or os.getenv("ANTHROPIC_API_KEY", "")
         )
+        anthropic_base = (
+            agent_cfg.get("anthropic_base_url")
+            or os.getenv("ANTHROPIC_BASE_URL", "")
+        )
         openai_key = (
             agent_cfg.get("openai_api_key")
             or os.getenv("OPENAI_API_KEY", "")
         )
+        openai_base = (
+            agent_cfg.get("openai_base_url")
+            or os.getenv("OPENAI_BASE_URL", "")
+        )
 
-        # Inject keys into the environment so SDKs pick them up
+        # Inject into environment so SDKs pick them up
         if anthropic_key:
             os.environ.setdefault("ANTHROPIC_API_KEY", anthropic_key)
+        if anthropic_base:
+            os.environ.setdefault("ANTHROPIC_BASE_URL", anthropic_base)
         if openai_key:
             os.environ.setdefault("OPENAI_API_KEY", openai_key)
+        if openai_base:
+            os.environ.setdefault("OPENAI_BASE_URL", openai_base)
 
         return cls(
             backend=backend,
             model=model,
             max_budget_usd=max_budget_usd,
             anthropic_api_key=anthropic_key,
+            anthropic_base_url=anthropic_base,
             openai_api_key=openai_key,
+            openai_base_url=openai_base,
         )
 
     # Keep the old name as alias
@@ -177,12 +196,13 @@ class AutoEmuAgentRuntime:
             target_peripheral=target_peripheral,
         )
 
-        def _emit(phase: int, detail: str = "") -> None:
+        def _emit(phase: int, detail: str = "", kind: str = "info") -> None:
             if on_progress:
                 on_progress(PipelineProgress(
                     phase=phase,
                     phase_name=PIPELINE_PHASES[phase - 1],
                     detail=detail,
+                    kind=kind,
                 ))
 
         try:
@@ -198,39 +218,41 @@ class AutoEmuAgentRuntime:
             _emit(1, f"Vendor: {board.vendor}, arch: {board.arch}, family: {board.family}")
 
             # Phase 2 — fetch
-            _emit(2, "Searching the web for input data ...")
+            _emit(2, "Searching the web for input data ...", "search")
             fetch_result = self._do_fetch(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 platform_name=platform_name,
                 output_dir=data_dir,
-                on_progress=lambda msg: _emit(2, msg),
+                on_progress=lambda msg, k="info": _emit(2, msg, k),
             )
             result.fetch_result = fetch_result
             _emit(2, f"Fetch complete ({self._count_fetched(fetch_result)} artifacts)")
 
             # Phase 3 — build
-            _emit(3, "Running modeling pipeline ...")
+            _emit(3, "Running modeling pipeline ...", "agent_thinking")
             build_result = self._do_build(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 platform_name=platform_name,
                 data_dir=data_dir,
                 output_dir=output_dir,
+                on_progress=lambda msg, k="info": _emit(3, msg, k),
             )
             result.build_result = build_result
             generated = build_result.get("generated_files", [])
             result.generated_files = generated
-            _emit(3, f"Generated {len(generated)} file(s)")
+            _emit(3, f"Generated {len(generated)} file(s)", "agent_text")
 
             # Phase 4 — validate
-            _emit(4, "Validating generated code ...")
+            _emit(4, "Validating generated code ...", "compile")
             validation = self._do_validate(
                 output_dir,
-                on_progress=lambda msg: _emit(4, msg),
+                on_progress=lambda msg, k="compile": _emit(4, msg, k),
             )
             result.validation_result = validation
-            _emit(4, f"Validation: {'PASS' if validation.get('success') else 'ISSUES FOUND'}")
+            ok = validation.get("success")
+            _emit(4, f"Validation: {'PASS' if ok else 'ISSUES FOUND'}", "info" if ok else "fail")
 
             result.success = True
 
@@ -259,27 +281,21 @@ class AutoEmuAgentRuntime:
         target_peripheral: str,
         platform_name: str,
         output_dir: str,
-        on_progress: Callable[[str], None] | None = None,
+        on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        _log = on_progress or (lambda msg: None)
+        _log = on_progress or (lambda msg, kind="info": None)
 
-        if self.config.backend != "harness":
-            return self._do_fetch_agent(
-                target_mcu=target_mcu,
-                target_peripheral=target_peripheral,
-                output_dir=output_dir,
-            )
-
+        # Use local web search first; optionally enhance with agent
         fetcher = GenericDataFetcher()
-        _log("Running web search queries ...")
+        _log("Running web search queries ...", "search")
         candidates = fetcher.discover_candidates(target_mcu, target_peripheral)
-        _log(f"Found {len(candidates)} candidate(s)")
+        _log(f"Found {len(candidates)} candidate(s)", "search")
         for c in candidates[:10]:
-            _log(f"  [{c.category}] {c.title}  (score {c.score})")
+            _log(f"  [{c.category}] {c.title}  (score {c.score})", "search")
 
         selected = candidates[:10]
         if selected:
-            _log(f"Downloading top {len(selected)} candidate(s) ...")
+            _log(f"Downloading top {len(selected)} candidate(s) ...", "download")
         fetch_result = fetcher.fetch_selected(
             selected,
             output_dir,
@@ -287,10 +303,11 @@ class AutoEmuAgentRuntime:
             target_peripheral=target_peripheral,
         )
         for d in fetch_result.downloaded:
-            _log(f"  Downloaded: {Path(d['local_path']).name} ({d['category']})")
+            _log(f"  Downloaded: {Path(d['local_path']).name} ({d['category']})", "download")
         for e in fetch_result.errors:
-            _log(f"  Failed: {e}")
-        return {
+            _log(f"  Failed: {e}", "fail")
+
+        base_result = {
             "target_mcu": target_mcu,
             "target_peripheral": target_peripheral,
             "output_dir": output_dir,
@@ -300,39 +317,38 @@ class AutoEmuAgentRuntime:
             "success": len(fetch_result.downloaded) > 0,
         }
 
-    def _do_fetch_agent(
-        self,
-        *,
-        target_mcu: str,
-        target_peripheral: str,
-        output_dir: str,
-    ) -> dict[str, Any]:
-
-        orchestrator = AutoEmuOrchestrator(
-            backend=self.config.backend,
-            model=self.config.model,
-            max_budget_usd=self.config.max_budget_usd,
-        )
-        result = asyncio.run(
-            orchestrator.fetch_input_data(
-                FetchTask(
-                    target_mcu=target_mcu,
-                    target_peripheral=target_peripheral,
-                    output_dir=output_dir,
+        # If an agent backend is configured, try to enhance fetch via AI
+        if self.config.backend != "harness":
+            try:
+                _log("Enhancing search with AI agent ...", "agent_thinking")
+                orchestrator = AutoEmuOrchestrator(
+                    backend=self.config.backend,
+                    model=self.config.model,
+                    max_budget_usd=self.config.max_budget_usd,
                 )
-            )
-        )
-        if result.error:
-            raise RuntimeError(result.error)
-        bundle = resolve_fetched_input_bundle(
-            target_mcu=target_mcu,
-            target_peripheral=target_peripheral,
-            data_dir=output_dir,
-        )
-        manifest_path = Path(bundle.manifest_path)
-        if manifest_path.exists():
-            return json.loads(manifest_path.read_text(encoding="utf-8"))
-        return {"success": True, "agent_messages": result.agent_messages}
+
+                def _on_fetch_event(etype: str, phase: str, detail: str) -> None:
+                    _emit_agent_event(_log, etype, phase, detail)
+
+                agent_result = asyncio.run(
+                    orchestrator.fetch_input_data(
+                        FetchTask(
+                            target_mcu=target_mcu,
+                            target_peripheral=target_peripheral,
+                            output_dir=output_dir,
+                        ),
+                        on_event=_on_fetch_event,
+                    )
+                )
+                if agent_result.error:
+                    _log(f"Agent fetch failed: {agent_result.error}", "warn")
+                else:
+                    _log("Agent fetch completed", "agent_text")
+                    base_result["agent_messages"] = agent_result.agent_messages
+            except Exception as exc:
+                _log(f"Agent fetch unavailable: {exc}", "warn")
+
+        return base_result
 
     def _do_build(
         self,
@@ -342,83 +358,87 @@ class AutoEmuAgentRuntime:
         platform_name: str,
         data_dir: str,
         output_dir: str,
+        on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        if self.config.backend == "harness":
-            return run_target_model_pipeline(
-                target_mcu=target_mcu,
-                target_peripheral=target_peripheral,
-                data_dir=data_dir,
-                output_dir=output_dir,
-            )
+        _log = on_progress or (lambda msg, kind="info": None)
 
-        inputs = resolve_fetched_input_bundle(
+        # Always run the local harness pipeline first
+        harness_result = run_target_model_pipeline(
             target_mcu=target_mcu,
             target_peripheral=target_peripheral,
             data_dir=data_dir,
+            output_dir=output_dir,
         )
-        # For generic targets without SVD/headers, driver-only analysis is fine
-        if not inputs.svd_path and not inputs.header_path and not inputs.driver_paths:
-            raise ValueError(
-                f"No inputs found for {target_mcu}/{target_peripheral}. "
-                f"Fetch may have failed — no SVD, headers, or driver sources available."
-            )
 
-        orchestrator = AutoEmuOrchestrator(
-            backend=self.config.backend,
-            model=self.config.model,
-            max_budget_usd=self.config.max_budget_usd,
-        )
-        result = asyncio.run(
-            orchestrator.model_peripheral(
-                ModelingTask(
-                    peripheral_name=target_peripheral,
-                    mcu_family=infer_stm32_mcu_family(target_mcu),
-                    svd_path=inputs.svd_path,
-                    header_path=inputs.header_path,
-                    driver_paths=list(inputs.driver_paths),
-                    output_dir=output_dir,
+        # If an agent backend is configured, try to enhance with AI
+        if self.config.backend != "harness":
+            inputs = resolve_fetched_input_bundle(
+                target_mcu=target_mcu,
+                target_peripheral=target_peripheral,
+                data_dir=data_dir,
+            )
+            try:
+                _log("Enhancing model with AI agent ...", "agent_thinking")
+                orchestrator = AutoEmuOrchestrator(
+                    backend=self.config.backend,
+                    model=self.config.model,
+                    max_budget_usd=self.config.max_budget_usd,
                 )
-            )
-        )
-        if result.error:
-            raise RuntimeError(result.error)
 
-        output_path = Path(output_dir)
-        generated = [str(f) for f in sorted(output_path.rglob("*")) if f.is_file()]
-        return {
-            "peripheral_name": target_peripheral,
-            "generated_files": generated,
-            "target_mcu": target_mcu,
-        }
+                def _on_build_event(etype: str, phase: str, detail: str) -> None:
+                    _emit_agent_event(_log, etype, phase, detail)
+
+                result = asyncio.run(
+                    orchestrator.model_peripheral(
+                        ModelingTask(
+                            peripheral_name=target_peripheral,
+                            mcu_family=infer_stm32_mcu_family(target_mcu),
+                            svd_path=inputs.svd_path,
+                            header_path=inputs.header_path,
+                            driver_paths=list(inputs.driver_paths),
+                            output_dir=output_dir,
+                        ),
+                        on_event=_on_build_event,
+                    )
+                )
+                if result.error:
+                    _log(f"Agent build failed: {result.error}", "warn")
+                else:
+                    _log("Agent enhancement completed", "agent_text")
+                    harness_result["agent_messages"] = result.agent_messages
+            except Exception as exc:
+                _log(f"Agent build unavailable, using harness output: {exc}", "warn")
+
+        return harness_result
 
     def _do_validate(
         self,
         output_dir: str,
-        on_progress: Callable[[str], None] | None = None,
+        on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        _log = on_progress or (lambda msg: None)
+        _log = on_progress or (lambda msg, kind="compile": None)
         source_dir = Path(output_dir)
         if not source_dir.exists():
-            _log("No output directory found")
+            _log("No output directory found", "warn")
             return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No output directory"]}
         files = list(source_dir.glob("*.c")) + list(source_dir.glob("*.h"))
         if not files:
-            _log("No C/H files to validate")
+            _log("No C/H files to validate", "warn")
             return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No C/H files to validate"]}
 
-        _log(f"Checking {len(files)} file(s) against QEMU v9.2.4 headers ...")
+        _log(f"Checking {len(files)} file(s) against QEMU v9.2.4 headers ...", "compile")
         for f in files:
-            _log(f"  Compiling: {f.name}")
+            _log(f"  Compiling: {f.name}", "compile")
 
         result = validate_compile(files)
         for err in result.get("errors", []):
             fname = Path(err.get("file", "")).name
             stderr_line = err.get("stderr", "").split("\n")[0][:120]
-            _log(f"  FAIL: {fname} — {stderr_line}")
+            _log(f"  FAIL: {fname} — {stderr_line}", "fail")
         for w in result.get("warnings", []):
-            _log(f"  WARN: {w}")
+            _log(f"  WARN: {w}", "warn")
         ok = result.get("files_checked", 0) - len(result.get("errors", []))
-        _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(result.get('warnings', []))} warning(s)")
+        _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(result.get('warnings', []))} warning(s)", "compile")
         return result
 
     def _count_fetched(self, fetch_result: dict[str, Any]) -> int:
@@ -426,6 +446,65 @@ class AutoEmuAgentRuntime:
             return len(fetch_result["downloaded"])
         artifacts = fetch_result.get("artifacts", [])
         return sum(1 for a in artifacts if a.get("status") in ("downloaded", "cached"))
+
+
+def _emit_agent_event(
+    _log: Callable[[str, str], None],
+    etype: str,
+    phase: str,
+    detail: str,
+) -> None:
+    """Translate orchestrator events into styled log messages."""
+    if etype == "phase_start":
+        # Show a condensed version of the prompt sent to the agent
+        prompt_preview = detail.replace("\n", " ").strip()
+        if len(prompt_preview) > 150:
+            prompt_preview = prompt_preview[:147] + "..."
+        _log(f"Agent phase [{phase}] prompt: {prompt_preview}", "agent_thinking")
+    elif etype == "text":
+        # Agent text output — skip conversational filler, truncate long lines
+        for line in detail.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # Skip lines that are the agent talking about itself / asking
+            if _is_agent_filler(line):
+                continue
+            if len(line) > 200:
+                line = line[:197] + "..."
+            _log(f"  {line}", "agent_text")
+    elif etype == "tool_call":
+        _log(f"  Tool call: {detail}", "agent_tool")
+    elif etype == "phase_done":
+        _log(f"  Agent phase [{phase}] done (cost: {detail})", "agent_text")
+    elif etype == "error":
+        _log(f"  Agent error: {detail}", "fail")
+
+
+_FILLER_PATTERNS = [
+    "i don't yet have",
+    "if you want, i can",
+    "if you'd like, i can",
+    "let me know if",
+    "shall i",
+    "would you like me to",
+    "i can also",
+    "i'll now",
+    "i will now",
+    "here's what i",
+    "here is what i",
+    "i'm going to",
+    "i am going to",
+    "sure, i",
+    "certainly,",
+    "of course,",
+]
+
+
+def _is_agent_filler(line: str) -> bool:
+    """Return True if the line is conversational filler, not real output."""
+    lower = line.lower()
+    return any(lower.startswith(p) for p in _FILLER_PATTERNS)
 
 
 __all__ = [

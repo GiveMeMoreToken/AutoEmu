@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from lxml import html
@@ -156,6 +156,17 @@ def _normalize_search_result_url(url: str) -> str:
     return url
 
 
+def _sanitize_url(url: str) -> str:
+    """Percent-encode spaces and other unsafe characters in the URL path."""
+    parsed = urlparse(url)
+    safe_path = quote(parsed.path, safe="/:@!$&'()*+,;=-._~")
+    safe_query = quote(parsed.query, safe="/:@!$&'()*+,;=-._~?=")
+    return urlunparse((
+        parsed.scheme, parsed.netloc, safe_path,
+        parsed.params, safe_query, parsed.fragment,
+    ))
+
+
 def _normalize_download_url(url: str) -> str:
     normalized = _normalize_search_result_url(url)
     parsed = urlparse(normalized)
@@ -164,12 +175,12 @@ def _normalize_download_url(url: str) -> str:
         if len(parts) >= 5 and parts[2] == "blob":
             owner, repo, _blob, branch = parts[:4]
             tail = "/".join(parts[4:])
-            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{tail}"
-        if len(parts) >= 5 and parts[2] == "raw":
+            normalized = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{tail}"
+        elif len(parts) >= 5 and parts[2] == "raw":
             owner, repo, _raw, branch = parts[:4]
             tail = "/".join(parts[4:])
-            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{tail}"
-    return normalized
+            normalized = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{tail}"
+    return _sanitize_url(normalized)
 
 
 def resolve_fetched_input_bundle(
@@ -210,9 +221,9 @@ def resolve_fetched_input_bundle(
                 docs.append(local_path)
             elif category == "svd":
                 svds.append(local_path)
-            elif category == "headers":
+            elif category in ("headers", "header"):
                 headers.append(local_path)
-            elif category.startswith("drivers_"):
+            elif category.startswith("driver"):
                 drivers.append(local_path)
     else:
         # Try STM32-style layout: <data_dir>/<target_slug>/{svd,headers,drivers,...}
@@ -457,6 +468,14 @@ class GenericDataFetcher:
                 response = _urlopen_with_retry(request, timeout=self.search_timeout)
                 data = response.read()
 
+                # Validate content matches expected category
+                rejection = _check_content(data, candidate.category, filename)
+                if rejection:
+                    msg = f"Skipped {filename}: {rejection}"
+                    result.errors.append(msg)
+                    logger.info(msg)
+                    continue
+
                 dest.write_bytes(data)
                 sha = hashlib.sha256(data).hexdigest()
 
@@ -481,10 +500,61 @@ class GenericDataFetcher:
 
 
 def _url_to_filename(url: str, category: str) -> str:
-    """Derive a safe filename from a URL."""
+    """Derive a safe filename from a URL, ensuring a proper extension."""
     parsed = urlparse(url)
     name = Path(parsed.path).name
     if not name:
         name = f"{category}_{hashlib.md5(url.encode()).hexdigest()[:12]}"
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+    # Ensure the filename has an appropriate extension for the category
+    _default_ext = {"svd": ".svd", "header": ".h", "driver": ".c", "docs": ".txt"}
+    ext = _default_ext.get(category)
+    if ext and not any(name.endswith(e) for e in (ext, ".pdf", ".xml", ".svd", ".c", ".h", ".txt", ".md")):
+        name = f"{name}{ext}"
     return name
+
+
+def _check_content(data: bytes, category: str, filename: str) -> str | None:
+    """Validate downloaded content matches the expected category.
+
+    Returns a rejection reason string, or None if the content is acceptable.
+    """
+    # Empty files are never useful
+    if len(data) < 10:
+        return "file is empty or too small"
+
+    # Try to detect HTML pages masquerading as source/data files
+    head = data[:500].lstrip()
+    is_html = (
+        head.startswith(b"<!DOCTYPE") or head.startswith(b"<!doctype")
+        or head.startswith(b"<html") or head.startswith(b"<HTML")
+        or b"<head>" in head or b"<HEAD>" in head
+    )
+
+    if category == "driver":
+        # Driver files should be C source, not HTML
+        if is_html:
+            return "HTML page, not C source code"
+        # Check for at least some C-like content
+        text = data[:2000].decode("utf-8", errors="ignore")
+        if not any(tok in text for tok in ("void ", "int ", "#include", "#define", "return", "struct ", "typedef ")):
+            # Could be markdown or other non-C content
+            if text.startswith("#") and "\n##" in text:
+                return "Markdown document, not C source code"
+    elif category == "header":
+        if is_html:
+            return "HTML page, not C header"
+        text = data[:2000].decode("utf-8", errors="ignore")
+        if not any(tok in text for tok in ("#ifndef", "#define", "#pragma", "typedef ", "struct ", "#include")):
+            if text.startswith("#") and "\n##" in text:
+                return "Markdown document, not C header"
+    elif category == "svd":
+        if is_html:
+            return "HTML page, not SVD/XML"
+        text = data[:500].decode("utf-8", errors="ignore").lstrip()
+        if not (text.startswith("<?xml") or text.startswith("<device") or text.startswith("<peripheral")):
+            if text.startswith("#") and "\n##" in text:
+                return "Markdown document, not SVD file"
+    # docs category: accept anything (PDF, text, markdown, HTML)
+
+    return None
