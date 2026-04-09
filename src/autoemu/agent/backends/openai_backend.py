@@ -6,11 +6,14 @@ import json
 from typing import Any, AsyncIterator
 
 from agents import Agent, FunctionTool, RunConfig, Runner
+from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.items import (
     MessageOutputItem,
+    ReasoningItem,
     ToolCallItem,
     ToolCallOutputItem,
 )
+from agents.stream_events import RunItemStreamEvent
 
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
 
@@ -18,7 +21,6 @@ from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
 def _toolspec_to_openai(spec: ToolSpec) -> FunctionTool:
     """Convert a ToolSpec into an openai-agents FunctionTool."""
 
-    # Build a JSON Schema for the parameters.
     _type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
     properties: dict[str, Any] = {}
     for pname, ptype in spec.parameters.items():
@@ -31,14 +33,13 @@ def _toolspec_to_openai(spec: ToolSpec) -> FunctionTool:
         "additionalProperties": False,
     }
 
-    async def _invoke(ctx, input_json: str) -> str:
+    async def _invoke(ctx: Any, input_json: str) -> str:
         """Adapter: parse JSON input, call handler, return text."""
         try:
             args = json.loads(input_json) if input_json else {}
         except json.JSONDecodeError:
             args = {}
         result = await spec.handler(args)
-        # Extract text from the standard tool result format.
         content = result.get("content", [])
         texts = [c.get("text", "") for c in content if isinstance(c, dict)]
         return "\n".join(texts)
@@ -52,8 +53,50 @@ def _toolspec_to_openai(spec: ToolSpec) -> FunctionTool:
     )
 
 
+def _extract_message_text(item: MessageOutputItem) -> str:
+    """Pull plain text from a MessageOutputItem."""
+    raw = item.raw_item
+    if hasattr(raw, "content"):
+        parts: list[str] = []
+        for part in raw.content:
+            if hasattr(part, "text"):
+                parts.append(part.text)
+        return "\n".join(parts)
+    return str(raw) if raw else ""
+
+
+def _extract_tool_name_args(item: ToolCallItem) -> tuple[str, str]:
+    """Extract tool name and arguments from a ToolCallItem."""
+    raw = item.raw_item
+    name = getattr(raw, "name", "") or (item.title or "")
+    args = getattr(raw, "arguments", "")
+    if not isinstance(args, str):
+        try:
+            args = json.dumps(args)
+        except Exception:
+            args = str(args)
+    return name, args
+
+
+def _estimate_cost(raw_responses: list) -> float:
+    """Estimate total cost from raw model responses (very rough)."""
+    total_input = 0
+    total_output = 0
+    for resp in raw_responses:
+        usage = getattr(resp, "usage", None)
+        if usage:
+            total_input += getattr(usage, "input_tokens", 0)
+            total_output += getattr(usage, "output_tokens", 0)
+    # Conservative estimate; real cost depends on model pricing
+    return (total_input * 0.0000005 + total_output * 0.0000015)
+
+
 class OpenAIAgentsBackend(AgentBackend):
-    """Backend that delegates to the openai-agents SDK."""
+    """Backend that delegates to the openai-agents SDK.
+
+    Uses ``Runner.run_streamed()`` so events are emitted as the agent works
+    rather than all at once after completion.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         self._extra = kwargs
@@ -81,43 +124,52 @@ class OpenAIAgentsBackend(AgentBackend):
             tracing_disabled=self._extra.get("tracing_disabled", True),
         )
 
-        result = await Runner.run(
-            starting_agent=agent,
-            input=prompt,
-            run_config=run_config,
-            max_turns=self._extra.get("max_turns", 20),
-        )
+        try:
+            result_streaming = Runner.run_streamed(
+                starting_agent=agent,
+                input=prompt,
+                run_config=run_config,
+                max_turns=self._extra.get("max_turns", 20),
+            )
 
-        # Emit events from the collected items.
-        for item in result.new_items:
-            if isinstance(item, MessageOutputItem):
-                text = _extract_message_text(item)
-                if text:
-                    yield AgentEvent(type="text", text=text)
-            elif isinstance(item, ToolCallItem):
-                yield AgentEvent(
-                    type="tool_call",
-                    tool_name=item.raw_item.name if hasattr(item.raw_item, "name") else "",
-                    tool_input=item.raw_item.arguments if hasattr(item.raw_item, "arguments") else "",
-                )
-            elif isinstance(item, ToolCallOutputItem):
-                pass  # Tool results are internal; skip.
+            async for event in result_streaming.stream_events():
+                if event.type != "run_item_stream_event":
+                    continue
 
-        # Final output.
-        final = result.final_output
-        if final and isinstance(final, str):
-            yield AgentEvent(type="text", text=final)
+                item = event.item
 
-        yield AgentEvent(type="complete", cost_usd=0)
+                if isinstance(item, MessageOutputItem):
+                    text = _extract_message_text(item)
+                    if text:
+                        yield AgentEvent(type="text", text=text)
 
+                elif isinstance(item, ReasoningItem):
+                    # Show reasoning/thinking as agent_thinking (best-effort)
+                    raw = item.raw_item
+                    summary = getattr(raw, "summary", None)
+                    if summary:
+                        parts = [
+                            getattr(s, "text", str(s))
+                            for s in (summary if isinstance(summary, list) else [summary])
+                        ]
+                        text = " ".join(parts)
+                        if text:
+                            yield AgentEvent(type="text", text=f"[thinking] {text}")
 
-def _extract_message_text(item: MessageOutputItem) -> str:
-    """Pull plain text from a MessageOutputItem."""
-    raw = item.raw_item
-    if hasattr(raw, "content"):
-        parts = []
-        for part in raw.content:
-            if hasattr(part, "text"):
-                parts.append(part.text)
-        return "\n".join(parts)
-    return str(raw) if raw else ""
+                elif isinstance(item, ToolCallItem):
+                    name, args = _extract_tool_name_args(item)
+                    yield AgentEvent(
+                        type="tool_call",
+                        tool_name=name,
+                        tool_input=args[:500],
+                    )
+
+            cost_usd = _estimate_cost(getattr(result_streaming, "raw_responses", []))
+            yield AgentEvent(type="complete", cost_usd=cost_usd)
+
+        except MaxTurnsExceeded as exc:
+            yield AgentEvent(type="error", text=f"Max turns exceeded: {exc}")
+        except AgentsException as exc:
+            yield AgentEvent(type="error", text=f"Agent error: {exc}")
+        except Exception as exc:
+            yield AgentEvent(type="error", text=str(exc))
