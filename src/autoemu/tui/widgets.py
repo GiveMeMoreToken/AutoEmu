@@ -31,13 +31,28 @@ class LogPanel(RichLog):
         super().__init__(markup=True, **kwargs)
         self._plain_lines: list[str] = []
 
-    def write(self, content, **kwargs):  # type: ignore[override]
+    def write(  # type: ignore[override]
+        self,
+        content,
+        width=None,
+        expand=False,
+        shrink=True,
+        scroll_end=None,
+        animate=False,
+    ):
         """Override to capture a plain-text copy of every line written."""
         if isinstance(content, str):
             plain = _MARKUP_RE.sub("", content).rstrip()
             if plain:
                 self._plain_lines.append(plain)
-        return super().write(content, **kwargs)
+        return super().write(
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=scroll_end,
+            animate=animate,
+        )
 
     def save_to_file(self, path: str | Path | None = None) -> Path:
         """Write the current log to a plain-text file.
