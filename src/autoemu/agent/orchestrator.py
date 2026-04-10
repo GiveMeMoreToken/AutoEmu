@@ -25,6 +25,13 @@ from autoemu.agent.prompts import (
 )
 from autoemu.agent.tools import ALL_TOOLS
 
+# Tools available during the peripheral modeling phases.
+# fetch_data is intentionally excluded: each phase receives the data that was
+# already fetched in the dedicated fetch step.  Allowing fetch_data here caused
+# the agent to make redundant (and wrong-MCU-family) fetch calls during the
+# interrupt-analysis and dependency-graph phases.
+_MODEL_TOOLS = [t for t in ALL_TOOLS if t.name != "fetch_data"]
+
 
 @dataclass
 class ModelingTask:
@@ -171,7 +178,7 @@ def _build_validation_prompt(task: ModelingTask) -> str:
 
 def _build_fetch_prompt(task: FetchTask) -> str:
     return (
-        "Collect STM32 input data for the requested MCU and peripheral target.\n"
+        "Collect hardware documentation and driver source data for the requested MCU and peripheral.\n"
         f"Target MCU: {task.target_mcu}\n"
         f"Target peripheral: {task.target_peripheral}\n"
         f"Output directory: {task.output_dir}\n"
@@ -180,7 +187,8 @@ def _build_fetch_prompt(task: FetchTask) -> str:
         f"Pass target_mcu='{task.target_mcu}', "
         f"target_peripheral='{task.target_peripheral}', "
         f"output_dir='{task.output_dir}', refresh={str(task.refresh)}.\n"
-        "After the tool runs, summarize the manifest paths and any unresolved assets."
+        "After the tool runs, list the files that were successfully downloaded. "
+        "Do not fabricate file paths or manifest entries — only report what the tool actually returned."
     )
 
 
@@ -256,7 +264,7 @@ class AutoEmuOrchestrator:
                 async for event in self._backend.run(
                     prompt,
                     system_prompt=build_system_prompt(mode="model", cwd=task.output_dir),
-                    tools=ALL_TOOLS,
+                    tools=_MODEL_TOOLS,
                     model=self.model,
                     max_budget_usd=self.max_budget_usd,
                     cwd=task.output_dir,
@@ -318,7 +326,7 @@ class AutoEmuOrchestrator:
             async for event in self._backend.run(
                 prompt,
                 system_prompt=build_system_prompt(mode="model", cwd=task.output_dir),
-                tools=ALL_TOOLS,
+                tools=_MODEL_TOOLS,
                 model=self.model,
                 max_budget_usd=self.max_budget_usd,
                 cwd=task.output_dir,

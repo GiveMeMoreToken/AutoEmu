@@ -418,13 +418,33 @@ class AutoEmuAgentRuntime:
     ) -> dict[str, Any]:
         _log = on_progress or (lambda msg, kind="compile": None)
         source_dir = Path(output_dir)
+        extra_warnings: list[str] = []
+
         if not source_dir.exists():
             _log("No output directory found", "warn")
-            return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No output directory"]}
+            return {"success": False, "files_checked": 0, "errors": [], "warnings": ["No output directory"]}
+
+        # Check for empty peripheral models (zero registers = unusable QEMU device)
+        for model_file in source_dir.glob("*_peripheral.json"):
+            try:
+                model = json.loads(model_file.read_text(encoding="utf-8"))
+                regs = model.get("register_block", {}).get("registers", [])
+                base = model.get("base_address", 0)
+                if not regs:
+                    msg = f"{model_file.name} has 0 registers — generated MMIO device will reject all accesses"
+                    _log(f"  WARN: {msg}", "warn")
+                    extra_warnings.append(msg)
+                if not base:
+                    msg = f"{model_file.name} has base_address=0 — likely incorrect"
+                    _log(f"  WARN: {msg}", "warn")
+                    extra_warnings.append(msg)
+            except Exception:
+                pass
+
         files = list(source_dir.glob("*.c")) + list(source_dir.glob("*.h"))
         if not files:
             _log("No C/H files to validate", "warn")
-            return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No C/H files to validate"]}
+            return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No C/H files to validate"] + extra_warnings}
 
         _log(f"Checking {len(files)} file(s) against QEMU v9.2.4 headers ...", "compile")
         for f in files:
@@ -435,10 +455,12 @@ class AutoEmuAgentRuntime:
             fname = Path(err.get("file", "")).name
             stderr_line = err.get("stderr", "").split("\n")[0][:120]
             _log(f"  FAIL: {fname} — {stderr_line}", "fail")
-        for w in result.get("warnings", []):
+        all_warnings = result.get("warnings", []) + extra_warnings
+        for w in all_warnings:
             _log(f"  WARN: {w}", "warn")
         ok = result.get("files_checked", 0) - len(result.get("errors", []))
-        _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(result.get('warnings', []))} warning(s)", "compile")
+        _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(all_warnings)} warning(s)", "compile")
+        result["warnings"] = all_warnings
         return result
 
     def _count_fetched(self, fetch_result: dict[str, Any]) -> int:
@@ -455,19 +477,19 @@ def _emit_agent_event(
     detail: str,
 ) -> None:
     """Translate orchestrator events into styled log messages."""
+    # Escape brackets so Rich markup doesn't eat the phase name.
+    safe_phase = phase.replace("[", "(").replace("]", ")")
+
     if etype == "phase_start":
-        # Show a condensed version of the prompt sent to the agent
         prompt_preview = detail.replace("\n", " ").strip()
         if len(prompt_preview) > 150:
             prompt_preview = prompt_preview[:147] + "..."
-        _log(f"Agent phase [{phase}] prompt: {prompt_preview}", "agent_thinking")
+        _log(f"Agent phase ({safe_phase}) prompt: {prompt_preview}", "agent_thinking")
     elif etype == "text":
-        # Agent text output — skip conversational filler, truncate long lines
         for line in detail.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            # Skip lines that are the agent talking about itself / asking
             if _is_agent_filler(line):
                 continue
             if len(line) > 200:
@@ -476,15 +498,18 @@ def _emit_agent_event(
     elif etype == "tool_call":
         _log(f"  Tool call: {detail}", "agent_tool")
     elif etype == "phase_done":
-        _log(f"  Agent phase [{phase}] done (cost: {detail})", "agent_text")
+        _log(f"  Agent phase ({safe_phase}) done (cost: {detail})", "agent_text")
     elif etype == "error":
         _log(f"  Agent error: {detail}", "fail")
 
 
 _FILLER_PATTERNS = [
     "i don't yet have",
+    "i don't have the manifest",
+    "i don't have the",
     "if you want, i can",
     "if you'd like, i can",
+    "if you want, you can",
     "let me know if",
     "shall i",
     "would you like me to",
@@ -498,6 +523,16 @@ _FILLER_PATTERNS = [
     "sure, i",
     "certainly,",
     "of course,",
+    "you can send either",
+    "you can either",
+    "please provide",
+    "to proceed, i need",
+    "i need at least",
+    "i need either",
+    "next steps:",
+    "recommended next step",
+    "if you provide",
+    "once you provide",
 ]
 
 

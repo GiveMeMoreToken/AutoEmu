@@ -523,6 +523,16 @@ def _check_content(data: bytes, category: str, filename: str) -> str | None:
     if len(data) < 10:
         return "file is empty or too small"
 
+    # Reject binary/non-UTF8 content for text-based categories
+    if category in ("driver", "header", "svd"):
+        null_count = data[:4096].count(b"\x00")
+        non_printable = sum(
+            1 for b in data[:4096]
+            if b < 9 or (13 < b < 32 and b not in (9, 10, 13))
+        )
+        if null_count > 0 or non_printable > len(data[:4096]) * 0.05:
+            return "binary file, not text source"
+
     # Try to detect HTML pages masquerading as source/data files
     head = data[:500].lstrip()
     is_html = (
