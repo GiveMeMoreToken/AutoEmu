@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
+from pathlib import Path
+
 from textual.containers import Vertical
 from textual.widgets import RichLog, Static
 
 from autoemu.agent.runtime import PIPELINE_PHASES
+
+# Strip Rich markup tags for plain-text log files
+_MARKUP_RE = re.compile(r"\[/?[^\[\]]*\]")
 
 
 class LogPanel(RichLog):
@@ -22,6 +29,34 @@ class LogPanel(RichLog):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(markup=True, **kwargs)
+        self._plain_lines: list[str] = []
+
+    def write(self, content, **kwargs):  # type: ignore[override]
+        """Override to capture a plain-text copy of every line written."""
+        if isinstance(content, str):
+            plain = _MARKUP_RE.sub("", content).rstrip()
+            if plain:
+                self._plain_lines.append(plain)
+        return super().write(content, **kwargs)
+
+    def save_to_file(self, path: str | Path | None = None) -> Path:
+        """Write the current log to a plain-text file.
+
+        If *path* is not given, a timestamped file is created in the current
+        working directory (``autoemu_<timestamp>.log``).
+
+        Returns the path of the saved file.
+        """
+        if path is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = Path(f"autoemu_{stamp}.log")
+        path = Path(path)
+        path.write_text("\n".join(self._plain_lines), encoding="utf-8")
+        return path
+
+    def clear_log_buffer(self) -> None:
+        """Clear the plain-text log buffer (call before a new run)."""
+        self._plain_lines.clear()
 
     # -- plain log levels ----------------------------------------------------
 

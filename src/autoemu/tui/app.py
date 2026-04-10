@@ -232,6 +232,7 @@ class AutoEmuApp(App):
         Binding("q", "quit", "Quit", show=True),
         Binding("ctrl+r", "run_pipeline", "Run", show=True),
         Binding("ctrl+s", "toggle_settings", "Settings", show=True),
+        Binding("ctrl+l", "save_log", "Save log", show=True),
     ]
 
     def compose(self) -> ComposeResult:
@@ -306,6 +307,14 @@ class AutoEmuApp(App):
         elif event.button.id == "btn-close-cfg":
             self.action_toggle_settings()
 
+    def action_save_log(self) -> None:
+        log = self.query_one("#log", LogPanel)
+        try:
+            path = log.save_to_file()
+            log.log_success(f"Log saved to [bold]{path}[/]")
+        except Exception as exc:
+            log.log_error(f"Failed to save log: {exc}")
+
     def action_toggle_settings(self) -> None:
         panel = self.query_one("#settings-panel", SettingsScreen)
         if panel.has_class("visible"):
@@ -346,6 +355,7 @@ class AutoEmuApp(App):
         phases = self.query_one("#phase-list", PipelinePhaseList)
 
         self.app.call_from_thread(phases.reset_phases)
+        self.app.call_from_thread(log.clear_log_buffer)
 
         log.log_info(f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
 
@@ -409,5 +419,12 @@ class AutoEmuApp(App):
             log.write(f"[red]{traceback.format_exc()}[/]")
 
         finally:
+            # Auto-save log after every run
+            try:
+                path = log.save_to_file()
+                log.write(f"[dim]Log saved → {path}[/]")
+            except Exception:
+                pass
+
             btn = self.query_one("#btn-run", Button)
             self.app.call_from_thread(setattr, btn, "disabled", False)
