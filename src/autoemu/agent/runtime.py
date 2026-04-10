@@ -397,6 +397,7 @@ class AutoEmuAgentRuntime:
                             header_path=inputs.header_path,
                             driver_paths=list(inputs.driver_paths),
                             output_dir=output_dir,
+                            data_dir=data_dir,
                         ),
                         on_event=_on_build_event,
                     )
@@ -431,13 +432,13 @@ class AutoEmuAgentRuntime:
                 regs = model.get("register_block", {}).get("registers", [])
                 base = model.get("base_address", 0)
                 if not regs:
-                    msg = f"{model_file.name} has 0 registers — generated MMIO device will reject all accesses"
-                    _log(f"  WARN: {msg}", "warn")
-                    extra_warnings.append(msg)
+                    extra_warnings.append(
+                        f"{model_file.name} has 0 registers — generated MMIO device will reject all accesses"
+                    )
                 if not base:
-                    msg = f"{model_file.name} has base_address=0 — likely incorrect"
-                    _log(f"  WARN: {msg}", "warn")
-                    extra_warnings.append(msg)
+                    extra_warnings.append(
+                        f"{model_file.name} has base_address=0 — likely incorrect"
+                    )
             except Exception:
                 pass
 
@@ -461,6 +462,10 @@ class AutoEmuAgentRuntime:
         ok = result.get("files_checked", 0) - len(result.get("errors", []))
         _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(all_warnings)} warning(s)", "compile")
         result["warnings"] = all_warnings
+        # An empty register model produces a non-functional QEMU device —
+        # treat it as a validation failure so the TUI shows a red status.
+        if extra_warnings:
+            result["success"] = False
         return result
 
     def _count_fetched(self, fetch_result: dict[str, Any]) -> int:

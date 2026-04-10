@@ -43,6 +43,7 @@ class ModelingTask:
     header_path: str = ""
     driver_paths: list[str] = field(default_factory=list)
     output_dir: str = "output"
+    data_dir: str = ""          # directory where fetched input data lives
     phases: list[str] = field(default_factory=lambda: [
         "extract", "analyze", "infer", "connect", "generate", "validate"
     ])
@@ -88,6 +89,13 @@ class FetchResult:
 
 def _build_extraction_prompt(task: ModelingTask) -> str:
     parts = [REGISTER_EXTRACTION_PROMPT.format(peripheral_name=task.peripheral_name)]
+    if task.data_dir:
+        parts.append(
+            f"\nFetched input data is located in: {task.data_dir}\n"
+            f"Search subdirectories: {task.data_dir}/svd/, {task.data_dir}/header/, "
+            f"{task.data_dir}/driver/, {task.data_dir}/docs/\n"
+            f"Use list_files and read_file to find and read available files before parsing."
+        )
     if task.svd_path:
         parts.append(
             f"\nSVD file available at: {task.svd_path}\n"

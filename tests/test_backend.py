@@ -235,7 +235,9 @@ class TestOpenAIBackendStreaming:
         async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
             events.append(ev)
 
-        assert all(e.type != "text" for e in events)
+        # Non-run-item events produce no real content, only the no-output warning
+        text_events = [e for e in events if e.type == "text"]
+        assert all("no output" in e.text for e in text_events)
         assert any(e.type == "complete" for e in events)
 
     @pytest.mark.asyncio

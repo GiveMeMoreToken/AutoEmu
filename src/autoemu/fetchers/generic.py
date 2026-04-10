@@ -506,11 +506,29 @@ def _url_to_filename(url: str, category: str) -> str:
     if not name:
         name = f"{category}_{hashlib.md5(url.encode()).hexdigest()[:12]}"
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-    # Ensure the filename has an appropriate extension for the category
+
+    # Web page extensions that must never be kept for source-code categories
+    _web_exts = (".html", ".htm", ".php", ".asp", ".aspx", ".jsp")
+    # Accepted extensions per category (no appending needed)
+    _ok_exts = (".pdf", ".xml", ".svd", ".c", ".h", ".txt", ".md")
     _default_ext = {"svd": ".svd", "header": ".h", "driver": ".c", "docs": ".txt"}
-    ext = _default_ext.get(category)
-    if ext and not any(name.endswith(e) for e in (ext, ".pdf", ".xml", ".svd", ".c", ".h", ".txt", ".md")):
-        name = f"{name}{ext}"
+
+    stem, suffix = name.rsplit(".", 1) if "." in name else (name, "")
+    current_ext = f".{suffix}" if suffix else ""
+
+    if category in ("driver", "header", "svd"):
+        if current_ext.lower() in _web_exts:
+            # Strip the web extension and apply the correct source extension
+            ext = _default_ext[category]
+            name = f"{stem}{ext}"
+        elif current_ext not in _ok_exts:
+            name = f"{name}{_default_ext[category]}"
+    elif category == "docs":
+        # For docs, keep any extension; only strip if double web+something
+        if current_ext.lower() in _web_exts and "." in stem:
+            # e.g. "manual.md.html" → keep as "manual.md.html.txt" is bad;
+            # strip the trailing web ext and use the inner one
+            name = stem
     return name
 
 
