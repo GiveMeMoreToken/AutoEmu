@@ -1,9 +1,0 @@
-#!/bin/sh
-
-set -e
-
-echo "autoemu-rootfs: Buildroot userspace reached"
-dmesg | grep -E "probe succeeded|STM32 DMA driver registered|bound driver|g_zero" || true
-sync
-echo "autoemu-rootfs: serial shell is available on ttyAMA0"
-exit 0

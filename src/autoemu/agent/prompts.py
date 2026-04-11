@@ -111,9 +111,17 @@ The code must:
 - Use device_class_set_legacy_reset() for reset (NOT dc->reset)
 - Use bare field names in VMSTATE macros (NOT s->field)
 - Include hw/qdev-properties.h
+- Include qemu/timer.h whenever qemu_clock_get_ns(), timer_new_ns(), or any
+  QEMU_CLOCK_* constant is used (do NOT rely on transitive includes)
+- Name QTest harness files with the qtest_ prefix (e.g. qtest_hikey960_gpu.c)
+  so that the validator can skip them; they require a full QEMU build tree
 - Follow QEMU coding style (4-space indent, snake_case)
 - Generate meson.build snippet for Meson build integration
 - Generate QTest test using libqtest.h for validation
+- When a helper function writes to an output parameter, declare it as a pointer
+  (e.g. `static int foo_decode(hwaddr offset, hwaddr *regoff)` and assign with
+  `*regoff = ...;`). Never declare output parameters as non-pointer value types
+  and then try to dereference them with `*`.
 
 Use the register model, state machine, and interrupt model provided.
 Prefer the automatic model-bundle generation path when all step outputs are available.

@@ -347,6 +347,61 @@ class GenericDataFetcher:
         self.search_timeout = search_timeout
         self.max_results_per_query = max_results_per_query
 
+    # Known raw source URLs for well-known Linux kernel drivers, keyed by
+    # (vendor_substring, peripheral_keyword) → list of (url, category).
+    # These supplement web search when the platform is recognised.
+    _KNOWN_DRIVER_URLS: list[tuple[str, str, str, str]] = [
+        # (vendor_match, peripheral_match, url, category)
+        # HiSilicon / Kirin — Mali G71 (Bifrost) via panfrost
+        ("hisilicon", "gpu",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.c",
+         "driver"),
+        ("hisilicon", "gpu",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.h",
+         "header"),
+        ("hisilicon", "gpu",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_regs.h",
+         "header"),
+        ("hisilicon", "gpu",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_job.c",
+         "driver"),
+        # HiSilicon / Kirin — ADE display engine (kirin_drm_dss was never in mainline)
+        ("hisilicon", "display",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_ade.c",
+         "driver"),
+        ("hisilicon", "display",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_ade_reg.h",
+         "header"),
+        ("hisilicon", "display",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.c",
+         "driver"),
+        ("hisilicon", "display",
+         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.h",
+         "header"),
+        # STM32 — common peripheral headers from cmsis-svd / stm32-rs
+        ("stm32", "uart",
+         "https://raw.githubusercontent.com/stm32-rs/stm32-rs/master/stm32f4/src/stm32f407/usart1.rs",
+         "docs"),
+    ]
+
+    def _known_candidates(self, mcu: str, peripheral: str) -> list[SearchCandidate]:
+        """Return pre-scored candidates from the known-driver URL table."""
+        from autoemu.platforms import analyze_target
+        info = analyze_target(mcu)
+        vendor = info.vendor.lower()
+        periph_lower = peripheral.lower()
+        candidates = []
+        for vendor_key, periph_key, url, category in self._KNOWN_DRIVER_URLS:
+            if vendor_key in vendor and periph_key in periph_lower:
+                candidates.append(SearchCandidate(
+                    title=f"[known] {url.split('/')[-1]}",
+                    url=url,
+                    category=category,
+                    score=90,
+                    description=f"[{category}] known kernel driver source",
+                ))
+        return candidates
+
     def _build_queries(self, mcu: str, peripheral: str) -> list[tuple[str, str]]:
         """Return (query_string, category) pairs for this target.
 
@@ -366,20 +421,22 @@ class GenericDataFetcher:
         queries.append((f"{mcu} svd site:github.com", "svd"))
         queries.append((f"{mcu} svd register description", "svd"))
 
-        # Header queries
+        # Header queries — include raw.githubusercontent.com variant to find actual .h files
         queries.append((f"{mcu} {peripheral} register header .h site:github.com", "header"))
         queries.append((f"{mcu} register map header definition", "header"))
+        queries.append((f"site:raw.githubusercontent.com {mcu} {peripheral} .h", "header"))
 
         # Documentation queries (broad: include vendor terms)
         queries.append((f"{mcu} {peripheral} datasheet register map", "docs"))
         for term in extra_terms[:2]:
             queries.append((f"{term} {peripheral} register map datasheet", "docs"))
 
-        # Driver queries (broad: linux kernel, vendor SDK, etc.)
-        queries.append((f"{mcu} {peripheral} driver source code", "driver"))
-        queries.append((f"linux kernel driver {mcu} {peripheral}", "driver"))
+        # Driver queries — target raw source files specifically
+        queries.append((f"{mcu} {peripheral} driver source code site:github.com", "driver"))
+        queries.append((f"linux kernel driver {mcu} {peripheral} filetype:c", "driver"))
+        queries.append((f"site:raw.githubusercontent.com linux {peripheral} driver .c", "driver"))
         for term in extra_terms[:2]:
-            queries.append((f"{term} {peripheral} driver .c site:github.com", "driver"))
+            queries.append((f"linux kernel {term} {peripheral} driver site:github.com", "driver"))
 
         return queries
 
@@ -414,6 +471,13 @@ class GenericDataFetcher:
         queries = self._build_queries(target_mcu, target_peripheral)
         all_candidates: list[SearchCandidate] = []
         seen_urls: set[str] = set()
+
+        # Seed with known-good driver URLs before any web search
+        for candidate in self._known_candidates(target_mcu, target_peripheral):
+            normalized = candidate.url.split("?")[0].rstrip("/")
+            if normalized not in seen_urls:
+                seen_urls.add(normalized)
+                all_candidates.append(candidate)
 
         with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
             futures = {
@@ -454,9 +518,31 @@ class GenericDataFetcher:
             output_dir=str(out),
         )
 
+        # Exact filenames (case-insensitive, without extension) that are never
+        # acceptable source files for svd/header/driver categories.
+        _NON_SOURCE_STEMS = frozenset({
+            "readme", "changelog", "license", "contributing", "authors",
+            "kconfig", "makefile", "cmakelists", "build", "configure",
+            "dockerfile", "gitignore", "gitattributes",
+        })
+        # Extensions that are documentation, not source code
+        _DOC_EXTS = frozenset({".md", ".rst", ".txt", ".adoc", ".asciidoc", ".wiki"})
+
         for candidate in candidates:
             try:
                 download_url = _normalize_download_url(candidate.url)
+
+                # Pre-filter: reject build/doc/README URLs for source categories before download
+                if candidate.category in ("svd", "header", "driver"):
+                    url_tail = download_url.lower().split("/")[-1].split("?")[0]
+                    url_stem = url_tail.rsplit(".", 1)[0] if "." in url_tail else url_tail
+                    url_ext = ("." + url_tail.rsplit(".", 1)[1]) if "." in url_tail else ""
+                    if url_stem in _NON_SOURCE_STEMS or url_ext in _DOC_EXTS:
+                        msg = f"Skipped {download_url}: build/doc file not suitable for {candidate.category}"
+                        result.errors.append(msg)
+                        logger.info(msg)
+                        continue
+
                 filename = _url_to_filename(download_url, candidate.category)
                 category_dir = out / candidate.category
                 category_dir.mkdir(parents=True, exist_ok=True)
@@ -507,28 +593,52 @@ def _url_to_filename(url: str, category: str) -> str:
         name = f"{category}_{hashlib.md5(url.encode()).hexdigest()[:12]}"
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
 
-    # Web page extensions that must never be kept for source-code categories
+    # Extensions that are clearly web pages and should never be the final name
     _web_exts = (".html", ".htm", ".php", ".asp", ".aspx", ".jsp")
-    # Accepted extensions per category (no appending needed)
-    _ok_exts = (".pdf", ".xml", ".svd", ".c", ".h", ".txt", ".md")
+    # Extensions that are acceptable for each category (no further appending)
+    _ok_exts_per_cat: dict[str, set[str]] = {
+        "svd":    {".svd", ".xml"},
+        "header": {".h"},
+        "driver": {".c"},
+        "docs":   {".pdf", ".txt", ".md", ".html", ".htm"},
+    }
     _default_ext = {"svd": ".svd", "header": ".h", "driver": ".c", "docs": ".txt"}
 
-    stem, suffix = name.rsplit(".", 1) if "." in name else (name, "")
-    current_ext = f".{suffix}" if suffix else ""
+    if category not in _default_ext:
+        return name
+
+    ok_exts = _ok_exts_per_cat[category]
+
+    def _strip_ext(s: str) -> tuple[str, str]:
+        """Return (stem, '.ext') for the last extension, or (s, '') if none."""
+        if "." in s:
+            stem, suf = s.rsplit(".", 1)
+            return stem, f".{suf}"
+        return s, ""
+
+    stem, current_ext = _strip_ext(name)
 
     if category in ("driver", "header", "svd"):
         if current_ext.lower() in _web_exts:
-            # Strip the web extension and apply the correct source extension
-            ext = _default_ext[category]
-            name = f"{stem}{ext}"
-        elif current_ext not in _ok_exts:
-            name = f"{name}{_default_ext[category]}"
+            # Strip ALL non-source extensions from the compound stem.
+            # e.g. "hardware-user-manual.md.html" → strip ".html", then ".md"
+            clean = stem
+            while True:
+                inner_stem, inner_ext = _strip_ext(clean)
+                if inner_ext and inner_ext not in ok_exts:
+                    clean = inner_stem
+                else:
+                    break
+            name = f"{clean}{_default_ext[category]}"
+        elif current_ext not in ok_exts:
+            # Unknown extension (e.g. ".md" for svd) → replace it
+            name = f"{stem}{_default_ext[category]}"
+        # else: extension is already correct for this category
     elif category == "docs":
-        # For docs, keep any extension; only strip if double web+something
+        # For docs, strip trailing web ext if there's an inner extension
         if current_ext.lower() in _web_exts and "." in stem:
-            # e.g. "manual.md.html" → keep as "manual.md.html.txt" is bad;
-            # strip the trailing web ext and use the inner one
-            name = stem
+            name = stem  # e.g. "manual.md.html" → "manual.md"
+
     return name
 
 
@@ -540,6 +650,25 @@ def _check_content(data: bytes, category: str, filename: str) -> str | None:
     # Empty files are never useful
     if len(data) < 10:
         return "file is empty or too small"
+
+    # Extension-based early rejection: if the original filename reveals the true
+    # type, reject before inspecting content.
+    _doc_exts = {".md", ".rst", ".txt", ".adoc", ".wiki"}
+    # Stems (case-insensitive) that are never valid source files regardless of extension
+    _non_source_stems = frozenset({
+        "readme", "changelog", "license", "licence", "contributing", "authors",
+        "notice", "install", "todo", "credits",
+        "kconfig", "makefile", "cmakelists", "configure",
+        "dockerfile", "gitignore", "gitattributes",
+    })
+    fname_lower = filename.lower()
+    fname_stem = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+    fname_ext = ("." + fname_lower.rsplit(".", 1)[1]) if "." in fname_lower else ""
+    if category in ("driver", "header", "svd"):
+        if fname_ext in _doc_exts:
+            return f"documentation file ({fname_ext}), not {category} source"
+        if fname_stem in _non_source_stems:
+            return f"non-source file ({fname_stem}), not {category} source"
 
     # Reject binary/non-UTF8 content for text-based categories
     if category in ("driver", "header", "svd"):
@@ -566,7 +695,10 @@ def _check_content(data: bytes, category: str, filename: str) -> str | None:
         # Check for at least some C-like content
         text = data[:2000].decode("utf-8", errors="ignore")
         if not any(tok in text for tok in ("void ", "int ", "#include", "#define", "return", "struct ", "typedef ")):
-            # Could be markdown or other non-C content
+            # Kconfig-style files: start with "config " or "menuconfig "
+            if text.lstrip().startswith(("config ", "menuconfig ", "source ")):
+                return "Kconfig/build file, not C source code"
+            # Markdown
             if text.startswith("#") and "\n##" in text:
                 return "Markdown document, not C source code"
     elif category == "header":
@@ -581,8 +713,11 @@ def _check_content(data: bytes, category: str, filename: str) -> str | None:
             return "HTML page, not SVD/XML"
         text = data[:500].decode("utf-8", errors="ignore").lstrip()
         if not (text.startswith("<?xml") or text.startswith("<device") or text.startswith("<peripheral")):
-            if text.startswith("#") and "\n##" in text:
+            # SVD must be XML — reject anything that isn't
+            if text.startswith("#"):
                 return "Markdown document, not SVD file"
+            if not text.startswith("<"):
+                return "Not an XML/SVD file"
     # docs category: accept anything (PDF, text, markdown, HTML)
 
     return None

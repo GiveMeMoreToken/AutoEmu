@@ -1,4 +1,0 @@
-#!/bin/sh
-
-# This probe guest has no real network stack to configure in userspace.
-exit 0

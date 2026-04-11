@@ -381,10 +381,15 @@ class AutoEmuApp(App):
                 for i in range(1, 4):
                     self.app.call_from_thread(phases.set_phase_done, i)
                 val_ok = result.validation_result.get("success", True)
-                if val_ok:
+                val_errors = result.validation_result.get("errors", [])
+                val_warnings = result.validation_result.get("warnings", [])
+                val_skipped_qemu = any("QEMU source tree not found" in w for w in val_warnings)
+                if val_ok and not val_skipped_qemu and not val_warnings:
                     self.app.call_from_thread(phases.set_phase_done, 4)
-                else:
+                elif val_errors:
                     self.app.call_from_thread(phases.set_phase_error, 4)
+                else:
+                    self.app.call_from_thread(phases.set_phase_warn, 4)
                 log.log_success("Pipeline completed!")
             else:
                 log.log_error(f"Pipeline failed: {result.error}")
@@ -404,12 +409,19 @@ class AutoEmuApp(App):
                 checked = val.get("files_checked", 0)
                 errors = val.get("errors", [])
                 warnings = val.get("warnings", [])
-                if val.get("success"):
+                skipped_qemu = any("QEMU source tree not found" in w for w in warnings)
+                if val.get("success") and not warnings:
                     log.log_success(f"Validation: {checked} file(s) checked, no errors")
-                else:
+                elif val.get("success") and skipped_qemu:
+                    log.log_kind(f"Validation: compilation skipped (no QEMU source tree)", "warn")
+                elif val.get("success"):
+                    log.log_success(f"Validation: {checked} file(s) checked, no errors")
+                elif errors:
                     log.log_error(f"Validation: {len(errors)} error(s) in {checked} file(s)")
                     for err in errors[:10]:
                         log.write(f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]")
+                else:
+                    log.log_kind(f"Validation: {checked} file(s) checked, warnings only", "warn")
                 for w in warnings:
                     log.write(f"  [yellow]Warning: {w}[/]")
 

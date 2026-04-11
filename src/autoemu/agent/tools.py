@@ -460,8 +460,10 @@ async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
         target_peripheral = args["target_peripheral"]
         output_dir = args.get("output_dir", "data")
 
-        from autoemu.modeling_utils import normalize_name
-        data_dir = f"{output_dir}/{normalize_name(target_mcu)}"
+        # Use output_dir directly as the data directory — callers already include
+        # the MCU-specific path (e.g. "data/hikey960").  Adding the MCU slug here
+        # again would produce a double-nested path like "data/hikey960/hikey960".
+        data_dir = output_dir
 
         fetcher = GenericDataFetcher()
         candidates = fetcher.discover_candidates(target_mcu, target_peripheral)

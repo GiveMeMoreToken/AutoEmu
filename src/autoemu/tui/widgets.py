@@ -176,6 +176,11 @@ class PipelinePhaseList(Vertical):
         widget = self.query_one(f"#phase-{phase}", Static)
         widget.update(f"  [bold green]✓[/] {phase}. {name}")
 
+    def set_phase_warn(self, phase: int) -> None:
+        name = PIPELINE_PHASES[phase - 1]
+        widget = self.query_one(f"#phase-{phase}", Static)
+        widget.update(f"  [bold yellow]⚠[/] {phase}. {name}")
+
     def set_phase_error(self, phase: int) -> None:
         name = PIPELINE_PHASES[phase - 1]
         widget = self.query_one(f"#phase-{phase}", Static)

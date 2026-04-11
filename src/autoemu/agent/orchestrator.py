@@ -33,12 +33,25 @@ from autoemu.agent.tools import ALL_TOOLS
 _MODEL_TOOLS = [t for t in ALL_TOOLS if t.name != "fetch_data"]
 
 
+def _mcu_slug(task: "ModelingTask") -> str:
+    """Return a lowercase filesystem-safe MCU name for use in generated filenames.
+
+    Prefers ``task.target_mcu`` (exact user input) over the MCU family string,
+    so that e.g. "Hikey960" → "hikey960" rather than deriving "kirin960" from
+    the family.  Falls back to the family when target_mcu is not set.
+    """
+    from autoemu.modeling_utils import normalize_name
+    raw = task.target_mcu or task.mcu_family
+    return normalize_name(raw)
+
+
 @dataclass
 class ModelingTask:
     """A single peripheral modeling task."""
 
     peripheral_name: str
     mcu_family: str = "STM32F4"
+    target_mcu: str = ""         # exact MCU name as typed by the user (e.g. "Hikey960")
     svd_path: str = ""
     header_path: str = ""
     driver_paths: list[str] = field(default_factory=list)
@@ -120,6 +133,12 @@ def _build_extraction_prompt(task: ModelingTask) -> str:
 
 def _build_analysis_prompt(task: ModelingTask) -> str:
     parts = [BEHAVIOR_INFERENCE_PROMPT.format(peripheral_name=task.peripheral_name)]
+    if task.data_dir:
+        parts.append(
+            f"\nFetched input data is located in: {task.data_dir}\n"
+            f"Driver sources are in: {task.data_dir}/driver/\n"
+            f"Use list_files and read_file to enumerate available files."
+        )
     if task.driver_paths:
         for dp in task.driver_paths:
             parts.append(f"\nDriver source file: {dp}")
@@ -142,6 +161,11 @@ def _build_analysis_prompt(task: ModelingTask) -> str:
 
 def _build_interrupt_prompt(task: ModelingTask) -> str:
     prompt = INTERRUPT_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
+    if task.data_dir:
+        prompt += (
+            f"\n\nFetched input data is located in: {task.data_dir}\n"
+            f"Use list_files and read_file to find SVD, header, and driver files there."
+        )
     prompt += (
         "\n\nPrefer infer_interrupt_model after driver analysis and register extraction. "
         "Use build_interrupt_model only if manual refinement is necessary. "
@@ -152,6 +176,11 @@ def _build_interrupt_prompt(task: ModelingTask) -> str:
 
 def _build_dependency_prompt(task: ModelingTask) -> str:
     prompt = DEPENDENCY_ANALYSIS_PROMPT.format(peripheral_name=task.peripheral_name)
+    if task.data_dir:
+        prompt += (
+            f"\n\nFetched input data is located in: {task.data_dir}\n"
+            f"Use list_files and read_file to find available documentation and source files."
+        )
     prompt += (
         f"\n\nPrefer infer_dependency_graph after driver analysis, documentation review, "
         f"and interrupt modeling. Use build_dependency_graph only for manual refinement. "
@@ -162,6 +191,11 @@ def _build_dependency_prompt(task: ModelingTask) -> str:
 
 def _build_generation_prompt(task: ModelingTask) -> str:
     prompt = QEMU_GENERATION_PROMPT.format(peripheral_name=task.peripheral_name)
+    if task.data_dir:
+        prompt += (
+            f"\n\nFetched input data is located in: {task.data_dir}\n"
+            f"Use list_files and read_file to inspect available SVD, header, and driver files."
+        )
     prompt += (
         f"\n\nIf you have raw SVD/header/driver inputs and need the whole flow from scratch, "
         f"prefer run_model_pipeline with output_dir='{task.output_dir}'. "
@@ -169,17 +203,38 @@ def _build_generation_prompt(task: ModelingTask) -> str:
         f"to assemble the peripheral, emit QEMU artifacts, and write validation reports. "
         f"Use generate_qemu_peripheral and generate_test_harness only when manual refinement "
         f"is required."
+        f"\n\nIMPORTANT: If generate_model_bundle or run_model_pipeline fails or is unavailable, "
+        f"fall back to generating the QEMU C code directly in your response, then use write_file "
+        f"to save each file to '{task.output_dir}/'. Do NOT skip file creation — the code MUST "
+        f"be written to disk even if the tool calls fail.\n"
+        f"Name generated files after the actual MCU name '{_mcu_slug(task)}', not after a generic "
+        f"template or MCU family. "
+        f"Use filenames like '{_mcu_slug(task)}_{task.peripheral_name.lower()}.c' and "
+        f"'{_mcu_slug(task)}_{task.peripheral_name.lower()}.h'. "
+        f"Generate ONLY ONE .c and ONE .h file — do not create multiple variants with different "
+        f"MCU name prefixes (e.g. do not create both hikey960_gpu.c and kirin960_gpu.c). "
+        f"The header file must be included with a local path "
+        f"(e.g. #include \"{_mcu_slug(task)}_{task.peripheral_name.lower()}.h\"), "
+        f"not a system path (e.g. not #include \"hw/...\"), because it is generated "
+        f"into the same output directory."
     )
     return prompt
 
 
 def _build_validation_prompt(task: ModelingTask) -> str:
+    data_hint = ""
+    if task.data_dir:
+        data_hint = (
+            f"\nFetched source files are in: {task.data_dir}\n"
+            f"Generated output is in: {task.output_dir}\n"
+        )
     return (
         f"Validate the generated peripheral model for '{task.peripheral_name}':\n"
+        f"{data_hint}"
         f"1. Prefer the validation report produced by generate_model_bundle\n"
         f"2. Use validate_register_model to check register consistency\n"
         f"3. Use validate_behavior to check against driver patterns\n"
-        f"4. Review the generated QEMU code for correctness\n"
+        f"4. Review the generated QEMU code in '{task.output_dir}/' for correctness\n"
         f"5. Report any issues found and suggest fixes\n"
     )
 

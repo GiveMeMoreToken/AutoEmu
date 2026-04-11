@@ -158,10 +158,20 @@ def validate_compile(
         if path.suffix not in (".c", ".h"):
             continue
 
-        # Skip QTest files — they need the full QEMU test harness
+        # Skip QTest files — they need the full QEMU test harness.
+        # Match both qtest_*.c (standard naming) and any file that includes
+        # libqtest.h (e.g. agent-generated *-test.c files).
         if path.name.startswith("qtest_"):
             warnings.append(f"{path.name}: skipped QTest file (needs full QEMU build)")
             continue
+        if path.suffix == ".c":
+            try:
+                src_text = path.read_text(encoding="utf-8", errors="replace")
+                if "libqtest.h" in src_text:
+                    warnings.append(f"{path.name}: skipped QTest file (needs full QEMU build)")
+                    continue
+            except OSError:
+                pass
 
         files_checked += 1
 

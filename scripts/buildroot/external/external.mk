@@ -1,1 +1,0 @@
-# AutoEmu Buildroot external tree
