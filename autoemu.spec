@@ -5,9 +5,10 @@ a = Analysis(
     ['src/autoemu/main.py'],
     pathex=['src'],
     binaries=[],
-    datas=[('AGENTS.md', '.')],
+    datas=[],
     hiddenimports=[
         'autoemu.agent.backends.claude_backend',
+        'autoemu.agent.backends.codex_backend',
         'autoemu.agent.backends.openai_backend',
         'autoemu.agent.runtime',
         'autoemu.tui',

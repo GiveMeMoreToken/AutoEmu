@@ -28,10 +28,10 @@ class FakeSearcher(DuckDuckGoSearcher):
         return self._results[:max_results]
 
 
-def test_build_system_prompt_includes_agents_constraints():
+def test_build_system_prompt_includes_fetch_source_policy():
     prompt = build_system_prompt(mode="fetch")
-    assert "Repository constraints from AGENTS.md" in prompt
-    assert "Source Policy" in prompt
+    assert "trustworthy STM32 input data" in prompt
+    assert "Never invent URLs" in prompt
 
 
 def test_infer_stm32_mcu_family():
@@ -47,7 +47,7 @@ def test_normalize_and_tokenize():
 
 def test_generic_fetcher_discover_with_no_results():
     fetcher = GenericDataFetcher(searcher=FakeSearcher([]))
-    candidates = fetcher.discover_candidates("HIKEY960", "GPU")
+    candidates = fetcher.discover_candidates("UNKNOWN_MCU", "UNKNOWN_PERIPHERAL")
     assert candidates == []
 
 

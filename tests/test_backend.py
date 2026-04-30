@@ -10,6 +10,7 @@ from agents.items import MessageOutputItem, ToolCallItem
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
 from autoemu.agent.backends import create_backend
 from autoemu.agent.backends.claude_backend import ClaudeBackend
+from autoemu.agent.backends.codex_backend import CodexBackend
 from autoemu.agent.backends.openai_backend import OpenAIAgentsBackend
 from autoemu.agent.tools import ALL_TOOLS, TOOL_NAMES
 from autoemu.agent.orchestrator import AutoEmuOrchestrator, ModelingTask, ModelingResult
@@ -65,12 +66,20 @@ class TestCreateBackend:
     def test_create_openai(self):
         assert isinstance(create_backend("openai"), OpenAIAgentsBackend)
 
+    def test_create_codex(self):
+        assert isinstance(create_backend("codex"), CodexBackend)
+
     def test_create_unknown_raises(self):
         with pytest.raises(ValueError, match="Unknown backend"):
             create_backend("unknown")
 
     def test_both_are_agent_backend(self):
         assert isinstance(create_backend("claude"), AgentBackend)
+        assert isinstance(create_backend("openai"), AgentBackend)
+
+    def test_all_named_backends_are_agent_backend(self):
+        assert isinstance(create_backend("claude"), AgentBackend)
+        assert isinstance(create_backend("codex"), AgentBackend)
         assert isinstance(create_backend("openai"), AgentBackend)
 
 
@@ -286,3 +295,56 @@ class TestOpenAIBackendStreaming:
         error_events = [e for e in events if e.type == "error"]
         assert len(error_events) == 1
         assert "connection refused" in error_events[0].text
+
+
+class TestCodexBackend:
+    """Tests that CodexBackend.run() emits AutoEmu AgentEvents."""
+
+    @pytest.mark.asyncio
+    async def test_emits_text_and_complete_events(self, monkeypatch):
+        from autoemu.agent.backends import codex_backend as mod
+
+        captured: dict[str, object] = {}
+
+        class _FakeResult:
+            final_response = "hello from codex"
+            items = []
+            usage = None
+
+        class _FakeThread:
+            async def run(self, prompt, **kwargs):
+                captured["prompt"] = prompt
+                captured["run_kwargs"] = kwargs
+                return _FakeResult()
+
+        class _FakeAsyncCodex:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def thread_start(self, **kwargs):
+                captured["thread_kwargs"] = kwargs
+                return _FakeThread()
+
+        monkeypatch.setattr(mod, "AsyncCodex", _FakeAsyncCodex)
+
+        events = []
+        async for ev in mod.CodexBackend().run(
+            "Say hello",
+            system_prompt="system",
+            tools=[],
+            model="gpt-5.4",
+            cwd="/tmp",
+        ):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["text", "complete"]
+        assert events[0].text == "hello from codex"
+        assert captured["prompt"] == "Say hello"
+        assert captured["thread_kwargs"] == {
+            "model": "gpt-5.4",
+            "cwd": "/tmp",
+            "developer_instructions": "system",
+        }

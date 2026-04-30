@@ -24,7 +24,7 @@ from autoemu.validators.compile_validator import validate_compile, find_qemu_inc
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_AGENT_BACKENDS = {"harness", "claude", "openai"}
+SUPPORTED_AGENT_BACKENDS = {"harness", "claude", "codex", "openai"}
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ def _load_config_file() -> dict[str, Any]:
 class AgentRuntimeConfig:
     """Execution settings for the public agent runtime.
 
-    Resolution order: .autoemu.toml in CWD → environment variables → defaults.
+    Resolution order: environment variables → .autoemu.toml in CWD → defaults.
     """
 
     backend: str = "harness"
@@ -102,59 +102,54 @@ class AgentRuntimeConfig:
 
     @classmethod
     def load(cls) -> AgentRuntimeConfig:
-        """Build config from .autoemu.toml (CWD) then environment variables."""
+        """Build config from environment variables, .autoemu.toml, then defaults."""
         file_cfg = _load_config_file()
         agent_cfg = file_cfg.get("agent", {})
 
-        backend = (
-            agent_cfg.get("backend")
-            or os.getenv("AUTOEMU_AGENT_BACKEND")
-            or "harness"
-        ).strip().lower()
+        def _setting(file_key: str, env_key: str, default: Any = "") -> Any:
+            env_value = os.getenv(env_key)
+            if env_value:
+                return env_value
+            return agent_cfg.get(file_key, default)
+
+        backend = str(
+            _setting("backend", "AUTOEMU_AGENT_BACKEND", "harness")
+        ).strip().lower() or "harness"
         if backend not in SUPPORTED_AGENT_BACKENDS:
             raise ValueError(
                 "AUTOEMU_AGENT_BACKEND must be one of: "
                 + ", ".join(sorted(SUPPORTED_AGENT_BACKENDS))
             )
 
-        model = (
-            agent_cfg.get("model")
-            or os.getenv("AUTOEMU_AGENT_MODEL")
-            or ""
-        ).strip() or None
+        model = str(_setting("model", "AUTOEMU_AGENT_MODEL", "")).strip() or None
 
-        budget_raw = (
-            str(agent_cfg.get("max_budget_usd", ""))
-            or os.getenv("AUTOEMU_AGENT_MAX_BUDGET_USD", "")
+        budget_raw = str(
+            _setting("max_budget_usd", "AUTOEMU_AGENT_MAX_BUDGET_USD", "")
         ).strip()
         max_budget_usd = float(budget_raw) if budget_raw else 5.0
 
-        anthropic_key = (
-            agent_cfg.get("anthropic_api_key")
-            or os.getenv("ANTHROPIC_API_KEY", "")
-        )
-        anthropic_base = (
-            agent_cfg.get("anthropic_base_url")
-            or os.getenv("ANTHROPIC_BASE_URL", "")
-        )
-        openai_key = (
-            agent_cfg.get("openai_api_key")
-            or os.getenv("OPENAI_API_KEY", "")
-        )
-        openai_base = (
-            agent_cfg.get("openai_base_url")
-            or os.getenv("OPENAI_BASE_URL", "")
-        )
+        anthropic_key = str(
+            _setting("anthropic_api_key", "ANTHROPIC_API_KEY", "")
+        ).strip()
+        anthropic_base = str(
+            _setting("anthropic_base_url", "ANTHROPIC_BASE_URL", "")
+        ).strip()
+        openai_key = str(
+            _setting("openai_api_key", "OPENAI_API_KEY", "")
+        ).strip()
+        openai_base = str(
+            _setting("openai_base_url", "OPENAI_BASE_URL", "")
+        ).strip()
 
         # Inject into environment so SDKs pick them up
         if anthropic_key:
-            os.environ.setdefault("ANTHROPIC_API_KEY", anthropic_key)
+            os.environ["ANTHROPIC_API_KEY"] = anthropic_key
         if anthropic_base:
-            os.environ.setdefault("ANTHROPIC_BASE_URL", anthropic_base)
+            os.environ["ANTHROPIC_BASE_URL"] = anthropic_base
         if openai_key:
-            os.environ.setdefault("OPENAI_API_KEY", openai_key)
+            os.environ["OPENAI_API_KEY"] = openai_key
         if openai_base:
-            os.environ.setdefault("OPENAI_BASE_URL", openai_base)
+            os.environ["OPENAI_BASE_URL"] = openai_base
 
         return cls(
             backend=backend,

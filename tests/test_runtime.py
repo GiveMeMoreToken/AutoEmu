@@ -50,6 +50,43 @@ def test_runtime_config_defaults_to_harness(monkeypatch):
     assert config.max_budget_usd == 5.0
 
 
+def test_runtime_config_accepts_codex(monkeypatch):
+    monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
+    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", "codex")
+
+    config = AgentRuntimeConfig.load()
+
+    assert config.backend == "codex"
+
+
+def test_runtime_config_environment_overrides_file(monkeypatch):
+    monkeypatch.setattr(
+        "autoemu.agent.runtime._load_config_file",
+        lambda: {
+            "agent": {
+                "backend": "claude",
+                "model": "file-model",
+                "max_budget_usd": 2.0,
+                "openai_api_key": "file-openai-key",
+                "openai_base_url": "https://file.example/v1",
+            }
+        },
+    )
+    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", "openai")
+    monkeypatch.setenv("AUTOEMU_AGENT_MODEL", "env-model")
+    monkeypatch.setenv("AUTOEMU_AGENT_MAX_BUDGET_USD", "9.5")
+    monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+
+    config = AgentRuntimeConfig.load()
+
+    assert config.backend == "openai"
+    assert config.model == "env-model"
+    assert config.max_budget_usd == 9.5
+    assert config.openai_api_key == "env-openai-key"
+    assert config.openai_base_url == "https://env.example/v1"
+
+
 def test_pipeline_phases_defined():
     assert len(PIPELINE_PHASES) == 4
     assert "Detecting platform" in PIPELINE_PHASES

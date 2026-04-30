@@ -1,8 +1,8 @@
 """Prompt-driven agent orchestrator for the AutoEmu modeling pipeline.
 
 Uses the abstract :class:`AgentBackend` interface so that the pipeline
-works identically regardless of whether claude-agent-sdk or openai-agents
-is used underneath.
+works identically regardless of whether claude-agent-sdk,
+codex-app-server-sdk, or openai-agents is used underneath.
 """
 
 from __future__ import annotations
@@ -269,7 +269,7 @@ class AutoEmuOrchestrator:
     """Orchestrates the LLM-driven peripheral modeling pipeline.
 
     Args:
-        backend: Backend name (``"claude"`` or ``"openai"``), or an
+        backend: Backend name (``"claude"``, ``"codex"``, or ``"openai"``), or an
                  :class:`AgentBackend` instance directly.
         model: Model identifier override.
         max_budget_usd: Spending cap for the run.

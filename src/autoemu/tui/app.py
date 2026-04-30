@@ -73,7 +73,12 @@ class SettingsScreen(Container):
         with Horizontal(classes="settings-row"):
             yield Label("Backend:")
             yield Select(
-                [("Harness (local)", "harness"), ("Claude", "claude"), ("OpenAI", "openai")],
+                [
+                    ("Harness (local)", "harness"),
+                    ("Claude", "claude"),
+                    ("Codex", "codex"),
+                    ("OpenAI", "openai"),
+                ],
                 value="harness",
                 id="cfg-backend",
             )
@@ -290,6 +295,8 @@ class AutoEmuApp(App):
         elif backend == "claude":
             base = f" @ {cfg.anthropic_base_url}" if cfg.anthropic_base_url else ""
             text = f"[dim]Backend:[/] [bold cyan]Claude[/] model={model}{base}"
+        elif backend == "codex":
+            text = f"[dim]Backend:[/] [bold blue]Codex[/] model={model}"
         elif backend == "openai":
             base = f" @ {cfg.openai_base_url}" if cfg.openai_base_url else ""
             text = f"[dim]Backend:[/] [bold green]OpenAI[/] model={model}{base}"

@@ -1,7 +1,8 @@
 """Abstract backend interface for agent execution.
 
 Defines backend-agnostic tool specifications and event types so that
-the orchestrator can work with either claude-agent-sdk or openai-agents.
+the orchestrator can work with claude-agent-sdk, codex-app-server-sdk,
+or openai-agents.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ class AgentBackend(ABC):
     """Abstract interface for an LLM agent backend.
 
     Concrete implementations wrap a specific SDK (claude-agent-sdk,
-    openai-agents, etc.) and expose a uniform streaming interface.
+    codex-app-server-sdk, openai-agents, etc.) and expose a uniform
+    streaming interface.
     """
 
     @abstractmethod

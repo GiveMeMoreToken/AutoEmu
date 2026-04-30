@@ -1,7 +1,7 @@
 """Agent orchestration for automated peripheral modeling.
 
-Provides a backend-agnostic interface supporting both claude-agent-sdk
-and openai-agents SDKs.
+Provides a backend-agnostic interface supporting claude-agent-sdk,
+codex-app-server-sdk, and openai-agents SDKs.
 """
 
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
