@@ -15,7 +15,7 @@ The pipeline has six phases:
 5. **Generate** — Emits QEMU C code (`MemoryRegionOps`, IRQ wiring, `VMState`, reset handler), a standalone C test harness, and an AFL/libFuzzer fuzz harness.
 6. **Validate** — Runs structural, behavioral, compilation (`gcc -fsyntax-only`), security, and driver-replay validators, producing a `validation_report.json`.
 
-The pipeline is **harness-first**: the deterministic parsing and inference path is always primary. Claude, Codex, and OpenAI backends are optional fallbacks for steps where heuristics are insufficient.
+The pipeline is **harness-first**: the deterministic parsing and inference path is always primary. Agent backends are optional fallbacks for steps where heuristics are insufficient.
 
 ## Supported platforms
 
@@ -83,7 +83,7 @@ Create `.autoemu.toml` in your working directory:
 
 ```toml
 [agent]
-backend = "harness"           # "harness" (default), "claude", "codex", or "openai"
+backend = "harness"           # "harness" (default), "claude-sdk", "codex-sdk", "anthropic-api", or "openai-api"
 model   = ""                  # LLM model override (optional)
 max_budget_usd = 5.0          # Max spend per pipeline run
 
@@ -100,7 +100,7 @@ Environment variables override the config file:
 
 | Variable | Purpose |
 |----------|---------|
-| `AUTOEMU_AGENT_BACKEND` | `harness`, `claude`, `codex`, or `openai` |
+| `AUTOEMU_AGENT_BACKEND` | `harness`, `claude-sdk`, `codex-sdk`, `anthropic-api`, or `openai-api` |
 | `ANTHROPIC_API_KEY` | Anthropic / Claude-compatible API key |
 | `ANTHROPIC_BASE_URL` | Anthropic / Claude-compatible endpoint |
 | `OPENAI_API_KEY` | OpenAI-compatible API key |
@@ -111,9 +111,10 @@ Backend selection:
 | Backend | SDK / mode |
 |---------|------------|
 | `harness` | Local deterministic pipeline only |
-| `claude` | `claude-agent-sdk` with Anthropic-style API key and base URL |
-| `codex` | `codex-app-server-sdk` |
-| `openai` | `openai-agents` with OpenAI-style API key and base URL |
+| `claude-sdk` | `claude-agent-sdk` local agent runtime |
+| `codex-sdk` | `codex-app-server-sdk` local agent runtime |
+| `anthropic-api` | Anthropic-compatible Messages API with local AutoEmu tool execution |
+| `openai-api` | OpenAI-compatible Chat Completions API with local AutoEmu tool execution |
 
 See `.autoemu.toml.example` for an annotated template.
 
@@ -154,7 +155,8 @@ src/autoemu/
 │   ├── backend.py               #   AgentBackend ABC, ToolSpec, AgentEvent
 │   ├── backends/claude_backend.py
 │   ├── backends/codex_backend.py
-│   ├── backends/openai_backend.py
+│   ├── backends/anthropic_api_backend.py
+│   ├── backends/openai_api_backend.py
 │   ├── runtime.py               #   Config loading, unified run_pipeline()
 │   ├── orchestrator.py          #   6-phase prompt-driven orchestrator
 │   ├── prompts.py               #   System and phase-specific prompts
@@ -184,6 +186,7 @@ pytest -k "test_w1c" -v         # Pattern filter
 | `jinja2` | Code generation templates |
 | `rich` | Terminal formatting |
 | `pyyaml` | Config files |
-| `claude-agent-sdk` | Claude LLM backend |
-| `codex-app-server-sdk` | Codex backend |
-| `openai-agents` | OpenAI Agents backend |
+| `anthropic` | Anthropic-compatible API backend |
+| `claude-agent-sdk` | Claude SDK backend |
+| `codex-app-server-sdk` | Codex SDK backend |
+| `openai` | OpenAI-compatible API backend |

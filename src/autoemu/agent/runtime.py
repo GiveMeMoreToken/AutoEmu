@@ -24,7 +24,13 @@ from autoemu.validators.compile_validator import validate_compile, find_qemu_inc
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_AGENT_BACKENDS = {"harness", "claude", "codex", "openai"}
+SUPPORTED_AGENT_BACKENDS = {
+    "harness",
+    "claude-sdk",
+    "codex-sdk",
+    "anthropic-api",
+    "openai-api",
+}
 
 
 # ---------------------------------------------------------------------------

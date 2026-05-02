@@ -3,7 +3,8 @@
 # Values here override environment variables.
 
 [agent]
-# Backend: "harness" (default, no AI), "claude", or "openai"
+# Backend: "harness" (default, no AI), "claude-sdk", "codex-sdk",
+# "anthropic-api", or "openai-api"
 backend = "harness"
 
 # LLM model override (optional, backend-specific)

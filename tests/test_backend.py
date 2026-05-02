@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import pytest
 
-from agents.items import MessageOutputItem, ToolCallItem
-
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
 from autoemu.agent.backends import create_backend
-from autoemu.agent.backends.claude_backend import ClaudeBackend
-from autoemu.agent.backends.codex_backend import CodexBackend
-from autoemu.agent.backends.openai_backend import OpenAIAgentsBackend
+from autoemu.agent.backends.anthropic_api_backend import AnthropicApiBackend
+from autoemu.agent.backends.claude_backend import ClaudeSdkBackend
+from autoemu.agent.backends.codex_backend import CodexSdkBackend
+from autoemu.agent.backends.openai_api_backend import OpenAIApiBackend
 from autoemu.agent.tools import ALL_TOOLS, TOOL_NAMES
 from autoemu.agent.orchestrator import AutoEmuOrchestrator, ModelingTask, ModelingResult
 
@@ -60,38 +59,43 @@ class TestToolSpec:
 # ------------------------------------------------------------------ Factory
 
 class TestCreateBackend:
-    def test_create_claude(self):
-        assert isinstance(create_backend("claude"), ClaudeBackend)
-
-    def test_create_openai(self):
-        assert isinstance(create_backend("openai"), OpenAIAgentsBackend)
-
-    def test_create_codex(self):
-        assert isinstance(create_backend("codex"), CodexBackend)
+    @pytest.mark.parametrize(
+        ("name", "klass"),
+        [
+            ("claude-sdk", ClaudeSdkBackend),
+            ("codex-sdk", CodexSdkBackend),
+            ("anthropic-api", AnthropicApiBackend),
+            ("openai-api", OpenAIApiBackend),
+        ],
+    )
+    def test_create_named_backend(self, name, klass):
+        assert isinstance(create_backend(name), klass)
 
     def test_create_unknown_raises(self):
         with pytest.raises(ValueError, match="Unknown backend"):
             create_backend("unknown")
 
-    def test_both_are_agent_backend(self):
-        assert isinstance(create_backend("claude"), AgentBackend)
-        assert isinstance(create_backend("openai"), AgentBackend)
+    @pytest.mark.parametrize("old_name", ["claude", "codex", "openai"])
+    def test_old_backend_names_are_rejected(self, old_name):
+        with pytest.raises(ValueError, match="Unknown backend"):
+            create_backend(old_name)
 
     def test_all_named_backends_are_agent_backend(self):
-        assert isinstance(create_backend("claude"), AgentBackend)
-        assert isinstance(create_backend("codex"), AgentBackend)
-        assert isinstance(create_backend("openai"), AgentBackend)
+        assert isinstance(create_backend("claude-sdk"), AgentBackend)
+        assert isinstance(create_backend("codex-sdk"), AgentBackend)
+        assert isinstance(create_backend("anthropic-api"), AgentBackend)
+        assert isinstance(create_backend("openai-api"), AgentBackend)
 
 
 # ------------------------------------------------------------------ Orchestrator
 
 class TestOrchestrator:
     def test_init_with_string_backend(self):
-        o = AutoEmuOrchestrator(backend="claude")
-        assert isinstance(o.backend, ClaudeBackend)
+        o = AutoEmuOrchestrator(backend="claude-sdk")
+        assert isinstance(o.backend, ClaudeSdkBackend)
 
     def test_init_with_backend_instance(self):
-        b = create_backend("openai")
+        b = create_backend("openai-api")
         o = AutoEmuOrchestrator(backend=b)
         assert o.backend is b
 
@@ -114,191 +118,31 @@ class TestBackendConversion:
         assert _toolspec_to_claude(spec) is not None
 
     def test_toolspec_to_openai(self):
-        from autoemu.agent.backends.openai_backend import _toolspec_to_openai
+        from autoemu.agent.backends.openai_api_backend import _toolspec_to_openai
 
         async def dummy(args):
             return {"content": [{"type": "text", "text": "ok"}]}
 
         spec = ToolSpec(name="test", description="A test", parameters={"x": str}, handler=dummy)
-        ft = _toolspec_to_openai(spec)
-        assert ft.name == "test"
-        assert "x" in ft.params_json_schema["properties"]
+        tool = _toolspec_to_openai(spec)
+        assert tool["type"] == "function"
+        assert tool["function"]["name"] == "test"
+        assert "x" in tool["function"]["parameters"]["properties"]
 
-    @pytest.mark.asyncio
-    async def test_openai_tool_invoke(self):
-        from autoemu.agent.backends.openai_backend import _toolspec_to_openai
+    def test_toolspec_to_anthropic(self):
+        from autoemu.agent.backends.anthropic_api_backend import _toolspec_to_anthropic
 
-        async def echo(args):
-            return {"content": [{"type": "text", "text": f"got: {args.get('msg', '')}"}]}
+        async def dummy(args):
+            return {"content": [{"type": "text", "text": "ok"}]}
 
-        spec = ToolSpec(name="echo", description="Echo", parameters={"msg": str}, handler=echo)
-        ft = _toolspec_to_openai(spec)
-        result = await ft.on_invoke_tool(None, json.dumps({"msg": "hello"}))
-        assert "got: hello" in result
-
-
-# -------------------------------- OpenAI backend streaming (mock Runner)
-
-class _FakeRawItem:
-    def __init__(self, name="", arguments="", content=None):
-        self.name = name
-        self.arguments = arguments
-        self.content = content or []
+        spec = ToolSpec(name="test", description="A test", parameters={"x": str}, handler=dummy)
+        tool = _toolspec_to_anthropic(spec)
+        assert tool["name"] == "test"
+        assert "x" in tool["input_schema"]["properties"]
 
 
-class _FakeContent:
-    def __init__(self, text: str):
-        self.text = text
-
-
-class _FakeStreamingResult:
-    """Minimal stub for RunResultStreaming."""
-
-    def __init__(self, events):
-        self._events = events
-        self.raw_responses = []
-
-    async def stream_events(self):
-        for ev in self._events:
-            yield ev
-
-
-class _FakeRunItemEvent:
-    type = "run_item_stream_event"
-
-    def __init__(self, item):
-        self.item = item
-
-
-class _FakeOtherEvent:
-    type = "raw_response_event"
-
-
-class TestOpenAIBackendStreaming:
-    """Tests that OpenAIAgentsBackend.run() emits correct AgentEvents."""
-
-    def _make_msg_item(self, text: str) -> MessageOutputItem:
-        raw = _FakeRawItem(content=[_FakeContent(text)])
-        item = object.__new__(MessageOutputItem)
-        item.raw_item = raw
-        return item
-
-    def _make_tool_item(self, name: str, args: str) -> ToolCallItem:
-        raw = _FakeRawItem(name=name, arguments=args)
-        item = object.__new__(ToolCallItem)
-        item.raw_item = raw
-        item.title = name
-        return item
-
-    @pytest.mark.asyncio
-    async def test_emits_text_events(self, monkeypatch):
-        from autoemu.agent.backends import openai_backend as mod
-
-        msg_item = self._make_msg_item("hello from agent")
-        fake_result = _FakeStreamingResult([
-            _FakeRunItemEvent(msg_item),
-        ])
-
-        monkeypatch.setattr(mod.Runner, "run_streamed", lambda **kw: fake_result)
-
-        backend = OpenAIAgentsBackend()
-        events = []
-        async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
-            events.append(ev)
-
-        text_events = [e for e in events if e.type == "text"]
-        complete_events = [e for e in events if e.type == "complete"]
-        assert any("hello from agent" in e.text for e in text_events)
-        assert len(complete_events) == 1
-
-    @pytest.mark.asyncio
-    async def test_emits_tool_call_events(self, monkeypatch):
-        from autoemu.agent.backends import openai_backend as mod
-
-        tool_item = self._make_tool_item("read_file", '{"file_path": "/tmp/x"}')
-        fake_result = _FakeStreamingResult([
-            _FakeRunItemEvent(tool_item),
-        ])
-
-        monkeypatch.setattr(mod.Runner, "run_streamed", lambda **kw: fake_result)
-
-        backend = OpenAIAgentsBackend()
-        events = []
-        async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
-            events.append(ev)
-
-        tool_events = [e for e in events if e.type == "tool_call"]
-        assert len(tool_events) == 1
-        assert tool_events[0].tool_name == "read_file"
-        assert "file_path" in tool_events[0].tool_input
-
-    @pytest.mark.asyncio
-    async def test_skips_non_run_item_events(self, monkeypatch):
-        from autoemu.agent.backends import openai_backend as mod
-
-        fake_result = _FakeStreamingResult([_FakeOtherEvent()])
-        monkeypatch.setattr(mod.Runner, "run_streamed", lambda **kw: fake_result)
-
-        backend = OpenAIAgentsBackend()
-        events = []
-        async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
-            events.append(ev)
-
-        # Non-run-item events produce no real content, only the no-output warning
-        text_events = [e for e in events if e.type == "text"]
-        assert all("no output" in e.text for e in text_events)
-        assert any(e.type == "complete" for e in events)
-
-    @pytest.mark.asyncio
-    async def test_handles_max_turns_exceeded(self, monkeypatch):
-        from autoemu.agent.backends import openai_backend as mod
-        from agents.exceptions import MaxTurnsExceeded
-
-        async def _bad_stream():
-            raise MaxTurnsExceeded("too many turns")
-            yield  # make it a generator
-
-        class _BadResult:
-            raw_responses = []
-            async def stream_events(self):
-                raise MaxTurnsExceeded("too many turns")
-                yield
-
-        monkeypatch.setattr(mod.Runner, "run_streamed", lambda **kw: _BadResult())
-
-        backend = OpenAIAgentsBackend()
-        events = []
-        async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
-            events.append(ev)
-
-        error_events = [e for e in events if e.type == "error"]
-        assert len(error_events) == 1
-        assert "turns" in error_events[0].text.lower()
-
-    @pytest.mark.asyncio
-    async def test_handles_generic_exception(self, monkeypatch):
-        from autoemu.agent.backends import openai_backend as mod
-
-        class _ErrorResult:
-            raw_responses = []
-            async def stream_events(self):
-                raise ValueError("connection refused")
-                yield
-
-        monkeypatch.setattr(mod.Runner, "run_streamed", lambda **kw: _ErrorResult())
-
-        backend = OpenAIAgentsBackend()
-        events = []
-        async for ev in backend.run("test", system_prompt="", tools=[], model="gpt-4o"):
-            events.append(ev)
-
-        error_events = [e for e in events if e.type == "error"]
-        assert len(error_events) == 1
-        assert "connection refused" in error_events[0].text
-
-
-class TestCodexBackend:
-    """Tests that CodexBackend.run() emits AutoEmu AgentEvents."""
+class TestCodexSdkBackend:
+    """Tests that CodexSdkBackend.run() emits AutoEmu AgentEvents."""
 
     @pytest.mark.asyncio
     async def test_emits_text_and_complete_events(self, monkeypatch):
@@ -331,7 +175,7 @@ class TestCodexBackend:
         monkeypatch.setattr(mod, "AsyncCodex", _FakeAsyncCodex)
 
         events = []
-        async for ev in mod.CodexBackend().run(
+        async for ev in mod.CodexSdkBackend().run(
             "Say hello",
             system_prompt="system",
             tools=[],
@@ -348,3 +192,225 @@ class TestCodexBackend:
             "cwd": "/tmp",
             "developer_instructions": "system",
         }
+
+
+class _FakeFunction:
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCall:
+    type = "function"
+
+    def __init__(self, name: str, arguments: str, call_id: str = "call_1"):
+        self.id = call_id
+        self.function = _FakeFunction(name, arguments)
+
+
+class _FakeOpenAIMessage:
+    def __init__(self, content: str = "", tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _FakeOpenAIChoice:
+    def __init__(self, message: _FakeOpenAIMessage):
+        self.message = message
+
+
+class _FakeUsage:
+    input_tokens = 0
+    output_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+
+
+class _FakeOpenAIResponse:
+    def __init__(self, message: _FakeOpenAIMessage):
+        self.choices = [_FakeOpenAIChoice(message)]
+        self.usage = _FakeUsage()
+
+
+class _FakeOpenAICompletions:
+    def __init__(self, responses, captured):
+        self._responses = list(responses)
+        self._captured = captured
+
+    async def create(self, **kwargs):
+        self._captured.append(kwargs)
+        return self._responses.pop(0)
+
+
+class _FakeOpenAIChat:
+    def __init__(self, responses, captured):
+        self.completions = _FakeOpenAICompletions(responses, captured)
+
+
+class _FakeOpenAIClient:
+    def __init__(self, responses, captured):
+        self.chat = _FakeOpenAIChat(responses, captured)
+
+
+class TestOpenAIApiBackend:
+    @pytest.mark.asyncio
+    async def test_emits_text_and_complete_events(self, monkeypatch):
+        from autoemu.agent.backends import openai_api_backend as mod
+
+        captured = []
+        responses = [_FakeOpenAIResponse(_FakeOpenAIMessage(content="hello from api"))]
+        monkeypatch.setattr(
+            mod,
+            "AsyncOpenAI",
+            lambda **kwargs: _FakeOpenAIClient(responses, captured),
+        )
+
+        events = []
+        async for ev in mod.OpenAIApiBackend().run(
+            "Say hello",
+            system_prompt="system",
+            tools=[],
+            model="gpt-test",
+        ):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["text", "complete"]
+        assert events[0].text == "hello from api"
+        assert captured[0]["model"] == "gpt-test"
+        assert captured[0]["messages"][0] == {"role": "system", "content": "system"}
+
+    @pytest.mark.asyncio
+    async def test_executes_tool_calls(self, monkeypatch):
+        from autoemu.agent.backends import openai_api_backend as mod
+
+        async def echo(args):
+            return {"content": [{"type": "text", "text": f"tool saw {args['msg']}"}]}
+
+        spec = ToolSpec(name="echo", description="Echo", parameters={"msg": str}, handler=echo)
+        captured = []
+        responses = [
+            _FakeOpenAIResponse(
+                _FakeOpenAIMessage(
+                    tool_calls=[_FakeToolCall("echo", json.dumps({"msg": "hi"}))]
+                )
+            ),
+            _FakeOpenAIResponse(_FakeOpenAIMessage(content="final answer")),
+        ]
+        monkeypatch.setattr(
+            mod,
+            "AsyncOpenAI",
+            lambda **kwargs: _FakeOpenAIClient(responses, captured),
+        )
+
+        events = []
+        async for ev in mod.OpenAIApiBackend().run("Use tool", tools=[spec], model="gpt-test"):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["tool_call", "text", "complete"]
+        assert events[0].tool_name == "echo"
+        assert captured[0]["tools"][0]["function"]["name"] == "echo"
+        second_messages = captured[1]["messages"]
+        assert any(m.get("role") == "tool" and "tool saw hi" in m.get("content", "") for m in second_messages)
+
+
+class _FakeAnthropicText:
+    type = "text"
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _FakeAnthropicToolUse:
+    type = "tool_use"
+
+    def __init__(self, name: str, input_: dict, block_id: str = "toolu_1"):
+        self.id = block_id
+        self.name = name
+        self.input = input_
+
+
+class _FakeAnthropicUsage:
+    input_tokens = 0
+    output_tokens = 0
+
+
+class _FakeAnthropicResponse:
+    def __init__(self, content):
+        self.content = content
+        self.usage = _FakeAnthropicUsage()
+
+
+class _FakeAnthropicMessages:
+    def __init__(self, responses, captured):
+        self._responses = list(responses)
+        self._captured = captured
+
+    async def create(self, **kwargs):
+        self._captured.append(kwargs)
+        return self._responses.pop(0)
+
+
+class _FakeAnthropicClient:
+    def __init__(self, responses, captured):
+        self.messages = _FakeAnthropicMessages(responses, captured)
+
+
+class TestAnthropicApiBackend:
+    @pytest.mark.asyncio
+    async def test_emits_text_and_complete_events(self, monkeypatch):
+        from autoemu.agent.backends import anthropic_api_backend as mod
+
+        captured = []
+        responses = [_FakeAnthropicResponse([_FakeAnthropicText("hello from anthropic")])]
+        monkeypatch.setattr(
+            mod,
+            "AsyncAnthropic",
+            lambda **kwargs: _FakeAnthropicClient(responses, captured),
+        )
+
+        events = []
+        async for ev in mod.AnthropicApiBackend().run(
+            "Say hello",
+            system_prompt="system",
+            tools=[],
+            model="claude-test",
+        ):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["text", "complete"]
+        assert events[0].text == "hello from anthropic"
+        assert captured[0]["model"] == "claude-test"
+        assert captured[0]["system"] == "system"
+
+    @pytest.mark.asyncio
+    async def test_executes_tool_calls(self, monkeypatch):
+        from autoemu.agent.backends import anthropic_api_backend as mod
+
+        async def echo(args):
+            return {"content": [{"type": "text", "text": f"tool saw {args['msg']}"}]}
+
+        spec = ToolSpec(name="echo", description="Echo", parameters={"msg": str}, handler=echo)
+        captured = []
+        responses = [
+            _FakeAnthropicResponse([_FakeAnthropicToolUse("echo", {"msg": "hi"})]),
+            _FakeAnthropicResponse([_FakeAnthropicText("final answer")]),
+        ]
+        monkeypatch.setattr(
+            mod,
+            "AsyncAnthropic",
+            lambda **kwargs: _FakeAnthropicClient(responses, captured),
+        )
+
+        events = []
+        async for ev in mod.AnthropicApiBackend().run("Use tool", tools=[spec], model="claude-test"):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["tool_call", "text", "complete"]
+        assert events[0].tool_name == "echo"
+        assert captured[0]["tools"][0]["name"] == "echo"
+        second_messages = captured[1]["messages"]
+        assert any(
+            block.get("type") == "tool_result" and "tool saw hi" in block.get("content", "")
+            for message in second_messages
+            for block in (message.get("content") if isinstance(message.get("content"), list) else [])
+        )
