@@ -75,9 +75,10 @@ class SettingsScreen(Container):
             yield Select(
                 [
                     ("Harness (local)", "harness"),
-                    ("Claude", "claude"),
-                    ("Codex", "codex"),
-                    ("OpenAI", "openai"),
+                    ("Claude SDK", "claude-sdk"),
+                    ("Codex SDK", "codex-sdk"),
+                    ("Anthropic API", "anthropic-api"),
+                    ("OpenAI API", "openai-api"),
                 ],
                 value="harness",
                 id="cfg-backend",
@@ -292,14 +293,17 @@ class AutoEmuApp(App):
         model = cfg.model or "default"
         if backend == "harness":
             text = "[dim]Backend:[/] [bold]harness[/] (local, no AI)"
-        elif backend == "claude":
+        elif backend == "claude-sdk":
             base = f" @ {cfg.anthropic_base_url}" if cfg.anthropic_base_url else ""
-            text = f"[dim]Backend:[/] [bold cyan]Claude[/] model={model}{base}"
-        elif backend == "codex":
-            text = f"[dim]Backend:[/] [bold blue]Codex[/] model={model}"
-        elif backend == "openai":
+            text = f"[dim]Backend:[/] [bold cyan]Claude SDK[/] model={model}{base}"
+        elif backend == "codex-sdk":
+            text = f"[dim]Backend:[/] [bold blue]Codex SDK[/] model={model}"
+        elif backend == "anthropic-api":
+            base = f" @ {cfg.anthropic_base_url}" if cfg.anthropic_base_url else ""
+            text = f"[dim]Backend:[/] [bold magenta]Anthropic API[/] model={model}{base}"
+        elif backend == "openai-api":
             base = f" @ {cfg.openai_base_url}" if cfg.openai_base_url else ""
-            text = f"[dim]Backend:[/] [bold green]OpenAI[/] model={model}{base}"
+            text = f"[dim]Backend:[/] [bold green]OpenAI API[/] model={model}{base}"
         else:
             text = f"[dim]Backend:[/] {backend}"
         self.query_one("#backend-label", Static).update(text)

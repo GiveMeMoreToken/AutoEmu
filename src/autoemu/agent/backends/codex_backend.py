@@ -32,7 +32,7 @@ def _tool_reference(tools: list[ToolSpec]) -> str:
     return "\n".join(lines)
 
 
-class CodexBackend(AgentBackend):
+class CodexSdkBackend(AgentBackend):
     """Backend that delegates to the Codex app-server Python SDK."""
 
     def __init__(self, **kwargs) -> None:

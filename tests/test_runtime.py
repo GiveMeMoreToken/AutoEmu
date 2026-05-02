@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from autoemu.main import cli
@@ -50,13 +51,26 @@ def test_runtime_config_defaults_to_harness(monkeypatch):
     assert config.max_budget_usd == 5.0
 
 
-def test_runtime_config_accepts_codex(monkeypatch):
+@pytest.mark.parametrize(
+    "backend",
+    ["claude-sdk", "codex-sdk", "anthropic-api", "openai-api"],
+)
+def test_runtime_config_accepts_agent_backend(monkeypatch, backend):
     monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
-    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", "codex")
+    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", backend)
 
     config = AgentRuntimeConfig.load()
 
-    assert config.backend == "codex"
+    assert config.backend == backend
+
+
+@pytest.mark.parametrize("old_backend", ["claude", "codex", "openai"])
+def test_runtime_config_rejects_old_agent_backend_names(monkeypatch, old_backend):
+    monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
+    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", old_backend)
+
+    with pytest.raises(ValueError, match="AUTOEMU_AGENT_BACKEND"):
+        AgentRuntimeConfig.load()
 
 
 def test_runtime_config_environment_overrides_file(monkeypatch):
@@ -64,7 +78,7 @@ def test_runtime_config_environment_overrides_file(monkeypatch):
         "autoemu.agent.runtime._load_config_file",
         lambda: {
             "agent": {
-                "backend": "claude",
+                "backend": "claude-sdk",
                 "model": "file-model",
                 "max_budget_usd": 2.0,
                 "openai_api_key": "file-openai-key",
@@ -72,7 +86,7 @@ def test_runtime_config_environment_overrides_file(monkeypatch):
             }
         },
     )
-    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", "openai")
+    monkeypatch.setenv("AUTOEMU_AGENT_BACKEND", "openai-api")
     monkeypatch.setenv("AUTOEMU_AGENT_MODEL", "env-model")
     monkeypatch.setenv("AUTOEMU_AGENT_MAX_BUDGET_USD", "9.5")
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
@@ -80,7 +94,7 @@ def test_runtime_config_environment_overrides_file(monkeypatch):
 
     config = AgentRuntimeConfig.load()
 
-    assert config.backend == "openai"
+    assert config.backend == "openai-api"
     assert config.model == "env-model"
     assert config.max_budget_usd == 9.5
     assert config.openai_api_key == "env-openai-key"

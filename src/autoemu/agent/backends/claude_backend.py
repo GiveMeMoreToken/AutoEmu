@@ -28,7 +28,7 @@ def _toolspec_to_claude(spec: ToolSpec):
     )(spec.handler)
 
 
-class ClaudeBackend(AgentBackend):
+class ClaudeSdkBackend(AgentBackend):
     """Backend that delegates to claude-agent-sdk's ``query()``."""
 
     def __init__(self, **kwargs: Any) -> None:
