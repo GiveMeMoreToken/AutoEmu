@@ -18,6 +18,15 @@ from autoemu.agent.runtime import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_config(monkeypatch):
+    """Keep runtime tests independent from local .autoemu.toml and env vars."""
+    monkeypatch.delenv("AUTOEMU_AGENT_BACKEND", raising=False)
+    monkeypatch.delenv("AUTOEMU_AGENT_MODEL", raising=False)
+    monkeypatch.delenv("AUTOEMU_AGENT_MAX_BUDGET_USD", raising=False)
+    monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
