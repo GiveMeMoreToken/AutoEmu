@@ -424,7 +424,7 @@ class AutoEmuApp(App):
                 if val.get("success") and not warnings:
                     log.log_success(f"Validation: {checked} file(s) checked, no errors")
                 elif val.get("success") and skipped_qemu:
-                    log.log_kind(f"Validation: compilation skipped (no QEMU source tree)", "warn")
+                    log.log_kind("Validation: compilation skipped (no QEMU source tree)", "warn")
                 elif val.get("success"):
                     log.log_success(f"Validation: {checked} file(s) checked, no errors")
                 elif errors:

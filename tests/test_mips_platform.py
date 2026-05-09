@@ -4,7 +4,6 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from autoemu.platforms.mips import MIPSPlatform
 from autoemu.platforms.mips.naming import mips_snake, mips_type_name

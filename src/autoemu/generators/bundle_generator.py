@@ -20,7 +20,7 @@ from autoemu.modeling_utils import (
 from autoemu.models.dependency import DependencyGraph, DependencyType
 from autoemu.models.interrupt import InterruptModel
 from autoemu.models.peripheral import ClockConfig, Peripheral, PeripheralType
-from autoemu.models.register import BitField, Register, RegisterBlock
+from autoemu.models.register import Register, RegisterBlock
 from autoemu.models.state_machine import StateMachine
 from autoemu.parsers.driver_parser import DriverAnalysis, RegisterAccess, analyze_driver_file
 from autoemu.validators.behavior_validator import validate_behavior
@@ -106,6 +106,7 @@ def verify_peripheral_consistency(
     driver_data = normalize_driver_analysis(driver_analysis) if driver_analysis is not None else {}
     register_issues = validate_register_block(peripheral.register_block)
     behavior_issues = validate_behavior(peripheral, driver_data) if driver_data else []
+    replay: dict[str, Any]
     replay = replay_driver_accesses(
         peripheral,
         driver_data.get("register_accesses", []),

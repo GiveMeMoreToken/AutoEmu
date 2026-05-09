@@ -1,9 +1,8 @@
 """Tests for driver replay lifecycle and version comparison."""
 
-import pytest
 
 from autoemu.models.peripheral import Peripheral
-from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
+from autoemu.models.register import AccessType, Register, RegisterBlock
 from autoemu.validators.driver_replay import (
     LifecycleStage,
     TraceEntry,

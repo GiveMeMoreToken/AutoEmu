@@ -6,12 +6,15 @@ import json
 import os
 from typing import Any, AsyncIterator
 
-try:
-    from openai import AsyncOpenAI
-except ImportError:  # pragma: no cover - exercised only without optional SDK
-    AsyncOpenAI = None  # type: ignore[assignment]
-
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
+
+_AsyncOpenAI: Any
+try:
+    from openai import AsyncOpenAI as _AsyncOpenAI
+except ImportError:  # pragma: no cover - exercised only without optional SDK
+    _AsyncOpenAI = None
+
+AsyncOpenAI: Any = _AsyncOpenAI
 
 _DEFAULT_MODEL = "gpt-5"
 

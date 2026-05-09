@@ -19,7 +19,7 @@ from autoemu.models.interrupt import (
     InterruptLine,
     InterruptModel,
 )
-from autoemu.models.register import AccessType, BitField, RegisterBlock
+from autoemu.models.register import AccessType, RegisterBlock
 from autoemu.parsers.driver_parser import DriverAnalysis, analyze_driver_file
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import sys
+from collections.abc import Sequence
 from typing import Any, Iterable
 
 from autoemu.modeling_utils import (
@@ -25,7 +26,7 @@ _CLOCK_BUS_RE = re.compile(r"\b(AHB[1-4]?|APB[1-4]?)\b")
 
 
 def infer_dependency_graph(
-    driver_analyses: DriverAnalysis | dict[str, Any] | list[DriverAnalysis | dict[str, Any]],
+    driver_analyses: DriverAnalysis | dict[str, Any] | Sequence[DriverAnalysis | dict[str, Any]],
     *,
     peripheral_name: str = "",
     documentation_text: str = "",
@@ -53,7 +54,7 @@ def infer_dependency_graph(
 
 
 def _infer_dependency_graph_impl(
-    driver_analyses: DriverAnalysis | dict[str, Any] | list[DriverAnalysis | dict[str, Any]],
+    driver_analyses: DriverAnalysis | dict[str, Any] | Sequence[DriverAnalysis | dict[str, Any]],
     *,
     peripheral_name: str = "",
     documentation_text: str = "",
@@ -214,9 +215,9 @@ def load_dependency_graph_json(path: str | Path) -> DependencyGraph:
 
 
 def _normalize_driver_analyses(
-    driver_analyses: DriverAnalysis | dict[str, Any] | list[DriverAnalysis | dict[str, Any]],
+    driver_analyses: DriverAnalysis | dict[str, Any] | Sequence[DriverAnalysis | dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if isinstance(driver_analyses, list):
+    if isinstance(driver_analyses, Sequence) and not isinstance(driver_analyses, (str, bytes, dict)):
         return [_normalize_driver_analysis(item) for item in driver_analyses]
     return [_normalize_driver_analysis(driver_analyses)]
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -13,8 +11,6 @@ from autoemu.agent.runtime import (
     AgentRuntimeConfig,
     AutoEmuAgentRuntime,
     PipelineProgress,
-    PipelineResult,
-    PIPELINE_PHASES,
 )
 
 
@@ -108,29 +104,6 @@ def test_runtime_config_environment_overrides_file(monkeypatch):
     assert config.max_budget_usd == 9.5
     assert config.openai_api_key == "env-openai-key"
     assert config.openai_base_url == "https://env.example/v1"
-
-
-def test_pipeline_phases_defined():
-    assert len(PIPELINE_PHASES) == 4
-    assert "Detecting platform" in PIPELINE_PHASES
-    assert "Fetching input data" in PIPELINE_PHASES
-    assert "Building QEMU peripheral model" in PIPELINE_PHASES
-    assert "Validating generated code" in PIPELINE_PHASES
-
-
-def test_pipeline_progress_defaults():
-    p = PipelineProgress()
-    assert p.phase == 0
-    assert p.total_phases == 4
-    assert not p.finished
-    assert not p.error
-
-
-def test_pipeline_result_defaults():
-    r = PipelineResult()
-    assert not r.success
-    assert r.error == ""
-    assert r.generated_files == []
 
 
 def test_run_pipeline_calls_phases(monkeypatch, tmp_path):

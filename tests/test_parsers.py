@@ -1,6 +1,5 @@
 """Tests for parsers."""
 
-import pytest
 from autoemu.parsers.svd_parser import parse_svd_string
 from autoemu.parsers.header_parser import (
     parse_typedef_structs,

@@ -1,6 +1,7 @@
 """Platform plugin registry."""
 from __future__ import annotations
 
+import importlib
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -123,15 +124,15 @@ def analyze_target(target_mcu: str) -> BoardInfo:
 def _auto_register():
     """Import built-in platform modules to trigger registration."""
     try:
-        from autoemu.platforms import stm32 as _  # noqa: F401
+        importlib.import_module("autoemu.platforms.stm32")
     except ImportError:
         pass
     try:
-        from autoemu.platforms import mips as _  # noqa: F401, F811
+        importlib.import_module("autoemu.platforms.mips")
     except ImportError:
         pass
     try:
-        from autoemu.platforms import generic as _  # noqa: F401, F811
+        importlib.import_module("autoemu.platforms.generic")
     except ImportError:
         pass
 

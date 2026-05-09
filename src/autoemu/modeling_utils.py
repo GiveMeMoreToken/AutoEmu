@@ -6,7 +6,7 @@ from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 
 from autoemu.models.register import RegisterBlock
 
@@ -33,7 +33,7 @@ def normalize_driver_analysis(driver_analysis: Any) -> dict[str, Any]:
     if isinstance(driver_analysis, dict):
         return driver_analysis
     if is_dataclass(driver_analysis):
-        return asdict(driver_analysis)
+        return asdict(cast(Any, driver_analysis))
     raise TypeError(f"Unsupported driver analysis type: {type(driver_analysis)!r}")
 
 

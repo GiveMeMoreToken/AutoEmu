@@ -99,7 +99,6 @@ class GenericPlatform(Platform):
 
     def naming_convention(self, peripheral: str) -> NamingInfo:
         """Use a generic naming convention based on the peripheral name."""
-        snake = peripheral.lower().replace("-", "_").replace(" ", "_")
         return NamingInfo(
             file_prefix="generic",
             type_prefix="GENERIC",

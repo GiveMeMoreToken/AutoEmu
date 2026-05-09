@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator
-
-try:
-    from codex_app_server import AsyncCodex
-except ImportError:  # pragma: no cover - exercised only without optional SDK
-    AsyncCodex = None  # type: ignore[assignment]
+from typing import Any, AsyncIterator
 
 from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
+
+_AsyncCodex: Any
+try:
+    from codex_app_server import AsyncCodex as _AsyncCodex
+except ImportError:  # pragma: no cover - exercised only without optional SDK
+    _AsyncCodex = None
+
+AsyncCodex: Any = _AsyncCodex
 
 
 def _tool_reference(tools: list[ToolSpec]) -> str:
@@ -56,7 +59,7 @@ class CodexSdkBackend(AgentBackend):
             return
 
         full_prompt = prompt + _tool_reference(tools or [])
-        thread_kwargs = {
+        thread_kwargs: dict[str, Any] = {
             "model": model or self._extra.get("model"),
             "cwd": cwd,
             "developer_instructions": system_prompt or None,

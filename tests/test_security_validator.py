@@ -1,10 +1,8 @@
 """Tests for security audit validators."""
 
-import pytest
 
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
-from autoemu.models.interrupt import InterruptFlag, InterruptLine, InterruptModel
 from autoemu.models.state_machine import State, StateMachine, Transition
 from autoemu.validators.security_validator import (
     check_config_lock_bypass,

@@ -37,7 +37,6 @@ from autoemu.models import (
     InterruptLine,
     DependencyGraph,
     DependencyEdge,
-    DependencyType,
 )
 
 
@@ -132,7 +131,7 @@ async def _extract_register_structure(args: dict[str, Any]) -> dict[str, Any]:
             header_path=args.get("header_path", ""),
             peripheral_name=periph,
         )
-        result = {name: blk.model_dump() for name, blk in blocks.items()}
+        result: dict[str, Any] = {name: blk.model_dump() for name, blk in blocks.items()}
         if warnings:
             result["_warnings"] = warnings
         return _ok(json.dumps(result, indent=2))
@@ -273,7 +272,7 @@ async def _build_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
         lines_data = json.loads(args["lines_json"])
         event_map = json.loads(args.get("event_map_json", "{}"))
 
-        lines = [InterruptLine.model_validate(l) for l in lines_data]
+        lines = [InterruptLine.model_validate(line_data) for line_data in lines_data]
 
         model = InterruptModel(
             peripheral_name=args["peripheral_name"],

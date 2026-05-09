@@ -1,11 +1,10 @@
 """Tests for data models."""
 
-import pytest
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
 from autoemu.models.state_machine import State, Transition, StateMachine
-from autoemu.models.interrupt import InterruptModel, InterruptLine, InterruptFlag, FlagBehavior
+from autoemu.models.interrupt import InterruptModel
 from autoemu.models.dependency import DependencyEdge, DependencyGraph, DependencyType
-from autoemu.models.peripheral import Peripheral, PeripheralType
+from autoemu.models.peripheral import Peripheral
 
 
 class TestBitField:

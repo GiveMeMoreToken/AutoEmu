@@ -10,7 +10,6 @@ from typing import Any
 
 from autoemu.modeling_utils import canonical_flag_name, is_non_mmio_register
 from autoemu.models.peripheral import Peripheral
-from autoemu.models.register import AccessType
 
 
 def validate_behavior(

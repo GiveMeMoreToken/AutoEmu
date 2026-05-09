@@ -6,7 +6,6 @@ Run with: pytest -m integration
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -453,8 +452,6 @@ def test_driver_only_pipeline_no_inputs_raises():
 
 def _assert_pipeline_success(result, output_dir):
     """Common assertions for pipeline output."""
-    output_path = Path(output_dir)
-
     # Pipeline completed
     assert result["peripheral_name"]
 

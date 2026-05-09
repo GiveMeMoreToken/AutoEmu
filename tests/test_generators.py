@@ -3,7 +3,6 @@
 import tempfile
 from pathlib import Path
 
-import pytest
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
 from autoemu.models.peripheral import Peripheral, PeripheralType
 from autoemu.models.interrupt import (

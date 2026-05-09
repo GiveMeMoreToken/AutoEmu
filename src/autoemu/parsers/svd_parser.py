@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from lxml import etree
 
@@ -88,14 +87,16 @@ def parse_field(field_elem: etree._Element, reg_access: AccessType) -> BitField 
         bit_range = _text(field_elem, "bitRange")
         if bit_range:
             bit_range = bit_range.strip("[]")
-            msb, lsb = bit_range.split(":")
-            bit_offset = int(lsb)
-            bit_width = int(msb) - int(lsb) + 1
+            msb_text, lsb_text = bit_range.split(":")
+            lsb_value = int(lsb_text)
+            msb_value = int(msb_text)
+            bit_offset = lsb_value
+            bit_width = msb_value - lsb_value + 1
         else:
-            lsb = _int(field_elem, "lsb", 0)
-            msb = _int(field_elem, "msb", 0)
-            bit_offset = lsb
-            bit_width = msb - lsb + 1
+            lsb_value = _int(field_elem, "lsb", 0)
+            msb_value = _int(field_elem, "msb", 0)
+            bit_offset = lsb_value
+            bit_width = msb_value - lsb_value + 1
 
     # Skip fields with non-standard (invalid) widths
     if bit_width <= 0:

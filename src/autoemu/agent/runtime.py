@@ -19,7 +19,6 @@ from autoemu.fetchers.generic import (
 )
 from autoemu.modeling_utils import normalize_name as _snake
 from autoemu.pipeline import run_target_model_pipeline
-from autoemu.platforms import detect_platform
 from autoemu.validators.compile_validator import validate_compile, find_qemu_include_paths, QEMU_SOURCE_DIR
 
 logger = logging.getLogger(__name__)
@@ -244,7 +243,7 @@ def _fix_nested_data_dir(data_dir: str, mcu_slug: str, _log: Callable) -> None:
         _log(f"  Removed empty nested directory: {nested.name}/", "warn")
 
 
-def _clear_output_dir(output_dir: str, _emit: Callable) -> None:
+def _clear_output_dir(output_dir: str, _emit: Callable[[int, str, str], None]) -> None:
     """Remove generated C/H/JSON files from a previous run in output_dir.
 
     Keeps subdirectories (e.g. hw/misc/) so the agent can still write there,
@@ -268,6 +267,10 @@ def _clear_output_dir(output_dir: str, _emit: Callable) -> None:
             removed += 1
     if removed:
         _emit(3, f"Cleared {removed} stale item(s) from {output_dir}", "info")
+
+
+def _noop_progress(message: str, kind: str = "info") -> None:
+    return None
 
 
 class AutoEmuAgentRuntime:
@@ -320,12 +323,16 @@ class AutoEmuAgentRuntime:
 
             # Phase 2 — fetch
             _emit(2, "Searching the web for input data ...", "search")
+
+            def _emit_fetch(msg: str, kind: str = "info") -> None:
+                _emit(2, msg, kind)
+
             fetch_result = self._do_fetch(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 platform_name=platform_name,
                 output_dir=data_dir,
-                on_progress=lambda msg, k="info": _emit(2, msg, k),
+                on_progress=_emit_fetch,
             )
             result.fetch_result = fetch_result
             _emit(2, f"Fetch complete ({self._count_fetched(fetch_result)} artifacts)")
@@ -333,13 +340,17 @@ class AutoEmuAgentRuntime:
             # Phase 3 — build (clear stale output files first)
             _clear_output_dir(output_dir, _emit)
             _emit(3, "Running modeling pipeline ...", "agent_thinking")
+
+            def _emit_build(msg: str, kind: str = "info") -> None:
+                _emit(3, msg, kind)
+
             build_result = self._do_build(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 platform_name=platform_name,
                 data_dir=data_dir,
                 output_dir=output_dir,
-                on_progress=lambda msg, k="info": _emit(3, msg, k),
+                on_progress=_emit_build,
             )
             result.build_result = build_result
             generated = build_result.get("generated_files", [])
@@ -348,9 +359,13 @@ class AutoEmuAgentRuntime:
 
             # Phase 4 — validate
             _emit(4, "Validating generated code ...", "compile")
+
+            def _emit_validate(msg: str, kind: str = "compile") -> None:
+                _emit(4, msg, kind)
+
             validation = self._do_validate(
                 output_dir,
-                on_progress=lambda msg, k="compile": _emit(4, msg, k),
+                on_progress=_emit_validate,
             )
             result.validation_result = validation
             ok = validation.get("success")
@@ -391,7 +406,7 @@ class AutoEmuAgentRuntime:
         output_dir: str,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        _log = on_progress or (lambda msg, kind="info": None)
+        _log = on_progress or _noop_progress
 
         # Use local web search first; optionally enhance with agent
         fetcher = GenericDataFetcher()
@@ -476,7 +491,7 @@ class AutoEmuAgentRuntime:
         output_dir: str,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        _log = on_progress or (lambda msg, kind="info": None)
+        _log = on_progress or _noop_progress
 
         # Always run the local harness pipeline first (gracefully skip if no inputs)
         try:
@@ -545,7 +560,7 @@ class AutoEmuAgentRuntime:
         output_dir: str,
         on_progress: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
-        _log = on_progress or (lambda msg, kind="compile": None)
+        _log = on_progress or _noop_progress
         source_dir = Path(output_dir)
         extra_warnings: list[str] = []
 
@@ -588,7 +603,7 @@ class AutoEmuAgentRuntime:
             ] + extra_warnings
             for w in all_warnings:
                 _log(f"  WARN: {w}", "warn")
-            result = {"success": True, "files_checked": 0, "errors": [], "warnings": all_warnings}
+            result: dict[str, Any] = {"success": True, "files_checked": 0, "errors": [], "warnings": all_warnings}
             if extra_warnings:
                 result["success"] = False
             return result
@@ -597,22 +612,22 @@ class AutoEmuAgentRuntime:
         for f in files:
             _log(f"  Compiling: {f.name}", "compile")
 
-        result = validate_compile(files)
-        for err in result.get("errors", []):
+        compile_result: dict[str, Any] = validate_compile(files)
+        for err in compile_result.get("errors", []):
             fname = Path(err.get("file", "")).name
             stderr_line = err.get("stderr", "").split("\n")[0][:120]
             _log(f"  FAIL: {fname} — {stderr_line}", "fail")
-        all_warnings = result.get("warnings", []) + extra_warnings
+        all_warnings = compile_result.get("warnings", []) + extra_warnings
         for w in all_warnings:
             _log(f"  WARN: {w}", "warn")
-        ok = result.get("files_checked", 0) - len(result.get("errors", []))
-        _log(f"  {ok} passed, {len(result.get('errors', []))} failed, {len(all_warnings)} warning(s)", "compile")
-        result["warnings"] = all_warnings
+        ok = compile_result.get("files_checked", 0) - len(compile_result.get("errors", []))
+        _log(f"  {ok} passed, {len(compile_result.get('errors', []))} failed, {len(all_warnings)} warning(s)", "compile")
+        compile_result["warnings"] = all_warnings
         # An empty register model produces a non-functional QEMU device —
         # treat it as a validation failure so the TUI shows a red status.
         if extra_warnings:
-            result["success"] = False
-        return result
+            compile_result["success"] = False
+        return compile_result
 
     def _count_fetched(self, fetch_result: dict[str, Any]) -> int:
         if "downloaded" in fetch_result:

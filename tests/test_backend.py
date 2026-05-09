@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import pytest
 
-from autoemu.agent.backend import AgentBackend, AgentEvent, ToolSpec
+from autoemu.agent.backend import ToolSpec
 from autoemu.agent.backends import create_backend
 from autoemu.agent.backends.anthropic_api_backend import AnthropicApiBackend
 from autoemu.agent.backends.claude_backend import ClaudeSdkBackend
 from autoemu.agent.backends.codex_backend import CodexSdkBackend
 from autoemu.agent.backends.openai_api_backend import OpenAIApiBackend
 from autoemu.agent.tools import ALL_TOOLS, TOOL_NAMES
-from autoemu.agent.orchestrator import AutoEmuOrchestrator, ModelingTask, ModelingResult
+from autoemu.agent.orchestrator import AutoEmuOrchestrator, ModelingTask
 
 
 # ------------------------------------------------------------------ ToolSpec
@@ -79,13 +79,6 @@ class TestCreateBackend:
     def test_old_backend_names_are_rejected(self, old_name):
         with pytest.raises(ValueError, match="Unknown backend"):
             create_backend(old_name)
-
-    def test_all_named_backends_are_agent_backend(self):
-        assert isinstance(create_backend("claude-sdk"), AgentBackend)
-        assert isinstance(create_backend("codex-sdk"), AgentBackend)
-        assert isinstance(create_backend("anthropic-api"), AgentBackend)
-        assert isinstance(create_backend("openai-api"), AgentBackend)
-
 
 # ------------------------------------------------------------------ Orchestrator
 

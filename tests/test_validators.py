@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
-from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
+from autoemu.models.register import BitField, Register, RegisterBlock
 from autoemu.models.peripheral import Peripheral
 from autoemu.validators.register_validator import validate_register_block
 from autoemu.validators.behavior_validator import validate_behavior, replay_register_sequence

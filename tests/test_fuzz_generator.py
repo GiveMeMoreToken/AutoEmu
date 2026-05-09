@@ -1,6 +1,5 @@
 """Tests for fuzzing harness generator."""
 
-import pytest
 from pathlib import Path
 
 from autoemu.models.peripheral import Peripheral
@@ -88,15 +87,10 @@ class TestGenerateFuzzHarness:
         periph = _test_peripheral()
         files = generate_fuzz_harness(periph, tmp_path)
         assert len(files) == 2
+        names = {Path(f).name for f in files}
+        assert names == {"fuzz_usart_regs.c", "fuzz_usart_states.c"}
         for f in files:
             assert Path(f).exists()
-
-    def test_file_names(self, tmp_path: Path):
-        periph = _test_peripheral()
-        files = generate_fuzz_harness(periph, tmp_path)
-        names = {Path(f).name for f in files}
-        assert "fuzz_usart_regs.c" in names
-        assert "fuzz_usart_states.c" in names
 
     def test_register_fuzzer_is_valid_c(self, tmp_path: Path):
         periph = _test_peripheral()

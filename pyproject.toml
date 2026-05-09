@@ -44,3 +44,6 @@ testpaths = ["tests"]
 markers = [
     "integration: end-to-end integration tests (deselect with '-m not integration')",
 ]
+
+[tool.mypy]
+ignore_missing_imports = true

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from textual.containers import Vertical
 from textual.widgets import RichLog, Static
@@ -121,7 +122,7 @@ def _fmt_warn(msg: str) -> str:
 def _fmt_fail(msg: str) -> str:
     return f"[bold red]FAIL [/]  {msg}"
 
-_KIND_FORMATTERS: dict[str, object] = {
+_KIND_FORMATTERS: dict[str, Callable[[str], str]] = {
     "info":           _fmt_info,
     "agent_thinking": _fmt_agent_thinking,
     "agent_tool":     _fmt_agent_tool,

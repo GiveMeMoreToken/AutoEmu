@@ -216,13 +216,13 @@ def merge_driver_analyses(
                     register_accesses=list(pattern.register_accesses),
                 )
                 continue
-            existing = isr_index[key]
-            existing.checked_flags = _unique_in_order(existing.checked_flags + pattern.checked_flags)
-            existing.cleared_flags = _unique_in_order(existing.cleared_flags + pattern.cleared_flags)
-            existing.enabled_checks = _unique_in_order(existing.enabled_checks + pattern.enabled_checks)
-            existing.callbacks = _unique_in_order(existing.callbacks + pattern.callbacks)
-            existing.register_accesses = _dedupe_by_key(
-                [*existing.register_accesses, *pattern.register_accesses],
+            existing_pattern = isr_index[key]
+            existing_pattern.checked_flags = _unique_in_order(existing_pattern.checked_flags + pattern.checked_flags)
+            existing_pattern.cleared_flags = _unique_in_order(existing_pattern.cleared_flags + pattern.cleared_flags)
+            existing_pattern.enabled_checks = _unique_in_order(existing_pattern.enabled_checks + pattern.enabled_checks)
+            existing_pattern.callbacks = _unique_in_order(existing_pattern.callbacks + pattern.callbacks)
+            existing_pattern.register_accesses = _dedupe_by_key(
+                [*existing_pattern.register_accesses, *pattern.register_accesses],
                 key=lambda access: (
                     access.source_file,
                     access.source_line,
@@ -248,9 +248,9 @@ def merge_driver_analyses(
                     dependencies=list(sequence.dependencies),
                 )
                 continue
-            existing = init_index[key]
-            existing.accesses = _dedupe_by_key(
-                [*existing.accesses, *sequence.accesses],
+            existing_sequence = init_index[key]
+            existing_sequence.accesses = _dedupe_by_key(
+                [*existing_sequence.accesses, *sequence.accesses],
                 key=lambda access: (
                     access.source_file,
                     access.source_line,
@@ -262,7 +262,7 @@ def merge_driver_analyses(
                     access.value_expr,
                 ),
             )
-            existing.dependencies = _unique_in_order(existing.dependencies + sequence.dependencies)
+            existing_sequence.dependencies = _unique_in_order(existing_sequence.dependencies + sequence.dependencies)
     merged.init_sequences = list(init_index.values())
 
     merged.dma_configs = _dedupe_by_key(

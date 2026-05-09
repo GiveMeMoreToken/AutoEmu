@@ -117,7 +117,7 @@ class StateMachine(BaseModel):
         for s in self.states:
             shape = "doublecircle" if s.is_final else "circle"
             if s.is_initial:
-                lines.append(f"  __start [shape=point];")
+                lines.append("  __start [shape=point];")
                 lines.append(f'  __start -> "{s.name}";')
             lines.append(f'  "{s.name}" [shape={shape}];')
         for t in self.transitions:

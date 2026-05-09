@@ -7,12 +7,11 @@ works identically regardless of whether an SDK or direct API backend is used.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from autoemu.agent.backend import AgentBackend, AgentEvent
+from autoemu.agent.backend import AgentBackend
 from autoemu.agent.backends import create_backend
 from autoemu.agent.prompts import (
     REGISTER_EXTRACTION_PROMPT,

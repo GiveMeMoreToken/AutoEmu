@@ -6,6 +6,7 @@ import re
 import subprocess
 import shutil
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 QEMU_SOURCE_DIR = Path("build/qemu-src/qemu-9.2.4")
@@ -97,7 +98,7 @@ def _pkg_config_cflags(package: str) -> list[str]:
 
 
 def validate_compile(
-    source_files: list[str | Path],
+    source_files: Sequence[str | Path],
     *,
     qemu_src: Path | None = None,
     cc: str = "cc",

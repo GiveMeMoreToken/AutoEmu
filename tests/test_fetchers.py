@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from autoemu.agent.prompts import build_system_prompt
 from autoemu.fetchers.generic import (
