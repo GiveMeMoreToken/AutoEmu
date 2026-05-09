@@ -1,28 +1,83 @@
 # AutoEmu
 
-Automated QEMU peripheral model generator for microcontrollers.
+Harness-first QEMU peripheral model generation for microcontrollers and SoC
+targets.
 
-AutoEmu takes an MCU name and peripheral identifier, fetches the relevant documentation and driver source, and produces production-ready QEMU v9.2.4-compatible C code — header, implementation, meson snippet, and QTest harness — along with a full validation report.
+AutoEmu takes a target MCU or board name plus a peripheral identifier, gathers
+or accepts hardware inputs, builds a structured peripheral model, emits
+QEMU v9.2.4-compatible artifacts, and validates the generated bundle.
 
-## How it works
+The deterministic harness path is the primary implementation. Agent backends
+are optional helpers for fetch/build enrichment; they do not replace the local
+parsers, inference passes, generators, or validators.
 
-The pipeline has six phases:
+## Architecture
 
-1. **Fetch** — Downloads SVD files, CMSIS headers, HAL/LL drivers, and datasheets from vendor repositories and the web.
-2. **Extract** — Parses SVD XML and CMSIS C headers into a unified register block model.
-3. **Analyze** — Regex-driven analysis of HAL/LL driver source to identify register access patterns, ISR handlers, init sequences, and DMA configurations.
-4. **Infer** — Derives state machines, interrupt models (flag/enable/clear mappings, NVIC IRQ numbers), and cross-peripheral dependency graphs (RCC, DMA, GPIO, timers).
-5. **Generate** — Emits QEMU C code (`MemoryRegionOps`, IRQ wiring, `VMState`, reset handler), a standalone C test harness, and an AFL/libFuzzer fuzz harness.
-6. **Validate** — Runs structural, behavioral, compilation (`gcc -fsyntax-only`), security, and driver-replay validators, producing a `validation_report.json`.
+```mermaid
+flowchart TB
+    User[User] --> CLI[CLI: autoemu]
+    User --> API[Python API]
+    CLI --> TUI[Textual TUI]
+    TUI --> Runtime[Agent Runtime<br/>agent/runtime.py]
+    API --> Runtime
+    API --> Pipeline[Direct Modeling Pipeline<br/>pipeline.py]
 
-The pipeline is **harness-first**: the deterministic parsing and inference path is always primary. Agent backends are optional fallbacks for steps where heuristics are insufficient.
+    Runtime --> Platform[Platform Detection<br/>STM32 / MIPS / Generic]
+    Runtime --> Fetchers[Fetchers<br/>web search, download, manifest cache]
+    Runtime --> Pipeline
+    Runtime -. optional .-> Agents[Agent Orchestrator]
 
-## Supported platforms
+    Agents --> Backends[Backends<br/>Claude SDK / Codex SDK / Anthropic API / OpenAI API]
+    Agents --> Tools[AutoEmu Tool Registry]
 
-| Platform | Register source | Driver source |
-|----------|----------------|---------------|
-| STM32 (ARM Cortex-M) | CMSIS-SVD, CMSIS headers | STM32 HAL / LL drivers |
-| MIPS | PDF register tables, Device Tree | Linux kernel drivers (`readl`/`writel`) |
+    Fetchers --> Inputs[SVD / Headers / Drivers / Docs]
+    Inputs --> Parsers[Parsers<br/>SVD, CMSIS headers, HAL/LL, PDF, Device Tree, kernel drivers]
+    Parsers --> Models[Models<br/>RegisterBlock, Peripheral, StateMachine, InterruptModel, DependencyGraph]
+    Models --> Inference[Inference<br/>state machines, interrupts, dependencies]
+    Inference --> Bundle[Bundle Builder]
+    Bundle --> Generators[Generators<br/>QEMU C/H, Meson, QTest, standalone tests]
+    Bundle --> Validators[Validators<br/>register, behavior, compile, replay]
+    Generators --> Output[output/ artifacts]
+    Validators --> Report[*_validation.json]
+```
+
+## Workflow
+
+The public `AutoEmuAgentRuntime.run_pipeline()` workflow has four high-level
+phases:
+
+1. **Detect platform** — infers vendor, architecture, family, and platform
+   plugin from the target name.
+2. **Fetch input data** — discovers and downloads candidate SVD, header,
+   driver, and documentation files into `data/<target>/`, with manifest-based
+   input resolution.
+3. **Build QEMU peripheral model** — runs the deterministic modeling pipeline:
+   register extraction, driver analysis, state/interrupt/dependency inference,
+   peripheral assembly, and artifact generation.
+4. **Validate generated code** — checks generated C/H files against QEMU
+   include paths when available, reports warnings for missing QEMU headers, and
+   flags non-functional empty models.
+
+The lower-level `run_model_pipeline()` accepts explicit input files and runs
+the modeling sub-pipeline directly:
+
+```mermaid
+flowchart LR
+    A[SVD / Headers / Drivers / Docs] --> B[Extract Registers]
+    B --> C[Analyze Drivers]
+    C --> D[Infer State, IRQ, Dependencies]
+    D --> E[Assemble Peripheral Model]
+    E --> F[Generate Artifacts]
+    F --> G[Validate Bundle]
+```
+
+## Supported Platforms
+
+| Platform | Register sources | Driver sources | Notes |
+|----------|------------------|----------------|-------|
+| STM32 | CMSIS-SVD, CMSIS headers | STM32 HAL / LL C drivers | Dedicated platform plugin and naming |
+| MIPS | PDF register tables, Device Tree, vendor headers | Linux kernel drivers using `readl` / `writel` | Dedicated MIPS parsers |
+| Generic | SVD, XML, C headers, datasheets | Generic C drivers, Linux sources | Fallback for HiSilicon, Qualcomm, ESP32, Nordic, RISC-V, NXP, TI, and unknown targets |
 
 ## Installation
 
@@ -30,14 +85,22 @@ The pipeline is **harness-first**: the deterministic parsing and inference path 
 pip install -e .
 ```
 
-For compilation validation, `gcc` or `clang` must be on `PATH`. QEMU v9.2.4 headers are used for include-path validation when present.
+For development:
 
-To build a standalone binary:
+```bash
+pip install -e ".[dev]"
+```
+
+For standalone packaging:
 
 ```bash
 pip install -e ".[build]"
 pyinstaller autoemu.spec --clean
 ```
+
+Compilation validation uses `cc`, `gcc`, or `clang` when present. Full QEMU
+header validation is enabled when a QEMU v9.2.4 source tree exists at
+`build/qemu-src/qemu-9.2.4`.
 
 ## Usage
 
@@ -47,9 +110,28 @@ pyinstaller autoemu.spec --clean
 autoemu
 ```
 
-The terminal UI presents an input form for the target MCU and peripheral. Enter the target and click **Analyze** to run the full pipeline. Progress, phase status, and log output are displayed in real time. After each run the full log is saved to `autoemu_<timestamp>.log`.
+The TUI collects target MCU/board and peripheral names, runs the unified
+pipeline, streams progress by phase, and writes a timestamped log after each
+run.
 
-### Python API
+### Runtime API
+
+Use this path when AutoEmu should detect the platform, fetch inputs, build, and
+validate from only target names:
+
+```python
+from autoemu.agent.runtime import AutoEmuAgentRuntime
+
+runtime = AutoEmuAgentRuntime()
+result = runtime.run_pipeline(
+    target_mcu="STM32F407VG",
+    target_peripheral="ETH",
+)
+```
+
+### Direct Modeling API
+
+Use this path when input files are already available:
 
 ```python
 from autoemu.pipeline import run_model_pipeline
@@ -60,11 +142,12 @@ result = run_model_pipeline(
     svd_path="path/to/device.svd",
     header_path="path/to/stm32f4xx.h",
     driver_paths=["path/to/stm32f4xx_hal_uart.c"],
+    documentation_paths=["path/to/reference_manual.txt"],
     mcu_family="STM32F4",
 )
 ```
 
-To let AutoEmu fetch all inputs automatically:
+To reuse already fetched data under `data/<target>/`:
 
 ```python
 from autoemu.pipeline import run_target_model_pipeline
@@ -72,27 +155,25 @@ from autoemu.pipeline import run_target_model_pipeline
 result = run_target_model_pipeline(
     target_mcu="STM32F407VG",
     target_peripheral="ETH",
-    data_dir="data/stm32",
+    data_dir="data/stm32f407vg",
     output_dir="output",
 )
 ```
 
 ## Configuration
 
-Create `.autoemu.toml` in your working directory:
+Create `.autoemu.toml` in the working directory:
 
 ```toml
 [agent]
-backend = "harness"           # "harness" (default), "claude-sdk", "codex-sdk", "anthropic-api", or "openai-api"
-model   = ""                  # LLM model override (optional)
-max_budget_usd = 5.0          # Max spend per pipeline run
+backend = "harness"           # "harness", "claude-sdk", "codex-sdk", "anthropic-api", or "openai-api"
+model = ""                    # Optional backend-specific model override
+max_budget_usd = 5.0
 
-# Anthropic / Claude
-anthropic_api_key  = ""
+anthropic_api_key = ""
 anthropic_base_url = ""
 
-# OpenAI
-openai_api_key  = ""
+openai_api_key = ""
 openai_base_url = ""
 ```
 
@@ -101,79 +182,82 @@ Environment variables override the config file:
 | Variable | Purpose |
 |----------|---------|
 | `AUTOEMU_AGENT_BACKEND` | `harness`, `claude-sdk`, `codex-sdk`, `anthropic-api`, or `openai-api` |
+| `AUTOEMU_AGENT_MODEL` | Optional model override |
+| `AUTOEMU_AGENT_MAX_BUDGET_USD` | Optional per-run budget limit for agent backends |
 | `ANTHROPIC_API_KEY` | Anthropic / Claude-compatible API key |
 | `ANTHROPIC_BASE_URL` | Anthropic / Claude-compatible endpoint |
 | `OPENAI_API_KEY` | OpenAI-compatible API key |
 | `OPENAI_BASE_URL` | OpenAI-compatible endpoint |
 
-Backend selection:
+Backend modes:
 
-| Backend | SDK / mode |
-|---------|------------|
+| Backend | Behavior |
+|---------|----------|
 | `harness` | Local deterministic pipeline only |
-| `claude-sdk` | `claude-agent-sdk` local agent runtime |
-| `codex-sdk` | `codex-app-server-sdk` local agent runtime |
-| `anthropic-api` | Anthropic-compatible Messages API with local AutoEmu tool execution |
-| `openai-api` | OpenAI-compatible Chat Completions API with local AutoEmu tool execution |
+| `claude-sdk` | Claude Agent SDK runtime |
+| `codex-sdk` | Codex app-server SDK runtime |
+| `anthropic-api` | Anthropic-compatible Messages API with AutoEmu tools |
+| `openai-api` | OpenAI-compatible Chat Completions API with AutoEmu tools |
 
-See `.autoemu.toml.example` for an annotated template.
+See `.autoemu.toml.example` for a commented template.
 
 ## Output
 
-Each run writes to the specified output directory:
+A successful model build writes intermediate JSON, generated QEMU artifacts,
+standalone tests, and validation output. For `target_mcu="STM32F407VG"` and
+`target_peripheral="ETH"`, typical files are:
 
-```
+```text
 output/
-├── stm32_eth.h                  # Device type, register offsets, bit-field macros
-├── stm32_eth.c                  # MemoryRegionOps, IRQ wiring, VMState, reset handler
-├── meson.build                  # meson build snippet
-├── qtest_stm32_eth.c            # QEMU QTest harness
-├── test_stm32_eth.c             # Standalone C test harness
-├── stm32_eth_peripheral.json    # Full peripheral model (Pydantic-serialized)
-└── validation_report.json       # Per-validator results and accuracy metrics
+├── eth_registers.json
+├── eth_state_machine.json
+├── eth_interrupt_model.json
+├── eth_dependencies.json
+├── eth_peripheral.json
+├── stm32f4_eth.h
+├── stm32f4_eth.c
+├── meson.build
+├── qtest_stm32f4_eth.c
+├── stm32f4_eth_model.json
+├── test_stm32f4_eth.c
+└── eth_validation.json
 ```
 
-## Project structure
+Fuzz harness generation is available through
+`autoemu.generators.fuzz_generator.generate_fuzz_harness()` and produces
+`fuzz_<peripheral>_regs.c` and `fuzz_<peripheral>_states.c`.
 
-```
+## Project Structure
+
+```text
 src/autoemu/
-├── main.py                      # CLI entry point (Click → TUI)
-├── pipeline.py                  # Top-level pipeline orchestrator
+├── main.py                      # Click entry point that launches the TUI
+├── pipeline.py                  # Direct modeling pipeline
+├── modeling_utils.py            # Shared normalization/loading helpers
 ├── models/                      # Pydantic v2 data models
-│   ├── peripheral.py            #   Peripheral, PeripheralType, ClockConfig
-│   ├── register.py              #   Register, BitField, AccessType
-│   ├── state_machine.py         #   StateMachine, State, Transition
-│   ├── interrupt.py             #   InterruptModel, InterruptLine, FlagBehavior
-│   └── dependency.py            #   DependencyGraph, DependencyEdge
-├── parsers/                     # Input parsers (SVD, CMSIS headers, HAL/LL drivers)
-├── fetchers/                    # Web/GitHub data fetching with cache
-├── inference/                   # State machine, interrupt, and dependency inference
-├── generators/                  # QEMU C, test harness, bundle, and fuzz generators
-├── validators/                  # Register, behavior, compile, security, replay validators
-├── platforms/                   # Platform plugins (STM32, MIPS)
-├── agent/                       # Agent orchestration and LLM backends
-│   ├── backend.py               #   AgentBackend ABC, ToolSpec, AgentEvent
-│   ├── backends/claude_backend.py
-│   ├── backends/codex_backend.py
-│   ├── backends/anthropic_api_backend.py
-│   ├── backends/openai_api_backend.py
-│   ├── runtime.py               #   Config loading, unified run_pipeline()
-│   ├── orchestrator.py          #   6-phase prompt-driven orchestrator
-│   ├── prompts.py               #   System and phase-specific prompts
-│   └── tools.py                 #   Backend-agnostic tool registry (15+ tools)
-└── tui/                         # Textual terminal UI
-    ├── app.py
-    └── widgets.py
+├── parsers/                     # SVD, header, driver, and register extraction
+├── fetchers/                    # Web discovery, download, cache, input resolution
+├── inference/                   # State machine, interrupt, dependency inference
+├── generators/                  # QEMU, Meson, QTest, standalone, fuzz generators
+├── validators/                  # Register, behavior, compile, replay, security helpers
+├── platforms/                   # STM32, MIPS, and generic platform plugins
+├── agent/                       # Runtime, orchestrator, tool registry, backends
+└── tui/                         # Textual UI and widgets
 ```
 
-## Running tests
+## Running Tests and Checks
 
 ```bash
-pytest                          # Unit tests
-pytest -m integration           # End-to-end pipeline tests (requires network)
-pytest tests/test_models.py -v  # Single module
-pytest -k "test_w1c" -v         # Pattern filter
+pytest
+pytest -m integration
+ruff check src tests
+pyflakes src tests
+mypy src tests
+python -m compileall -q src tests
 ```
+
+The default test suite is local and deterministic. Integration tests exercise
+end-to-end behavior and may require network access or local fetched inputs.
 
 ## Dependencies
 
@@ -183,9 +267,9 @@ pytest -k "test_w1c" -v         # Pattern filter
 | `click` | CLI |
 | `pydantic >= 2` | Data models |
 | `lxml` | SVD / HTML parsing |
-| `jinja2` | Code generation templates |
+| `jinja2` | Code-generation support |
 | `rich` | Terminal formatting |
-| `pyyaml` | Config files |
+| `pyyaml` | Configuration/data parsing |
 | `anthropic` | Anthropic-compatible API backend |
 | `claude-agent-sdk` | Claude SDK backend |
 | `codex-app-server-sdk` | Codex SDK backend |
