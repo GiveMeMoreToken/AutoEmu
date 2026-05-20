@@ -6,7 +6,9 @@ and bit-field macro definitions from STM32 CMSIS headers.
 
 from __future__ import annotations
 
+import ast
 import logging
+import operator
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,6 +141,8 @@ class MacroDef:
     name: str
     value: str
     raw_value: str = ""
+    params: tuple[str, ...] = ()
+    comment: str = ""
 
 
 @dataclass
@@ -160,8 +164,8 @@ class TypedefStruct:
     total_size: int = 0
 
 
-_RE_DEFINE = re.compile(
-    r"^\s*#define\s+(\w+)\s+(.+?)(?:\s*/\*.*?\*/)?\s*$"
+_RE_DEFINE_LINE = re.compile(
+    r"^\s*#define\s+(?P<name>\w+)(?:\((?P<params>[^)]*)\))?\s+(?P<value>.*?)(?:\s*(?P<comment>/\*.*?\*/|//.*))?\s*$"
 )
 _RE_STRUCT_START = re.compile(
     r"typedef\s+struct\s*(?:\w+)?\s*\{"
@@ -192,6 +196,7 @@ _RE_BIT_DEF = re.compile(
 # Used as a fallback when no struct layout is found.
 _RE_DEFINE_REG_OFFSET = re.compile(
     r"#define\s+(\w+?)_(\w+)\s+\(\s*(\w+_BASE)\s*\+\s*(0x[0-9A-Fa-f]+)U?\s*\)"
+    r"\s*(/\*.*?\*/|//.*)?"
 )
 _RE_POS_DEF = re.compile(
     r"#define\s+(\w+)_(\w+)_(\w+)_Pos\s+\((\d+)U?\)"
@@ -213,8 +218,20 @@ _TYPE_SIZES = {
 def parse_macros(content: str) -> list[MacroDef]:
     """Extract all #define macros."""
     macros = []
-    for m in _RE_DEFINE.finditer(content):
-        macros.append(MacroDef(name=m.group(1), value=m.group(2).strip(), raw_value=m.group(0)))
+    for line in content.splitlines():
+        m = _RE_DEFINE_LINE.match(line)
+        if not m:
+            continue
+        params = tuple(
+            p.strip() for p in (m.group("params") or "").split(",") if p.strip()
+        )
+        macros.append(MacroDef(
+            name=m.group("name"),
+            value=m.group("value").strip(),
+            raw_value=line,
+            params=params,
+            comment=_strip_comment_markers(m.group("comment") or ""),
+        ))
     return macros
 
 
@@ -245,10 +262,12 @@ def _infer_access_from_description(description: str, default: AccessType) -> Acc
         return AccessType.W1S
     if "write 0 to clear" in text or "cleared by writing 0" in text:
         return AccessType.W0C
-    if "read only" in text:
+    if "(ro)" in text or "read-only" in text or "read only" in text:
         return AccessType.RO
-    if "write only" in text:
+    if "(wo)" in text or "write-only" in text or "write only" in text:
         return AccessType.WO
+    if "(rw)" in text or "read-write" in text or "read write" in text:
+        return AccessType.RW
     return default
 
 
@@ -438,32 +457,401 @@ def _define_based_register_blocks(
     content: str,
     base_addrs: dict[str, int],
     peripheral_name: str | None = None,
+    *,
+    family_expand_count: int = 4,
 ) -> dict[str, RegisterBlock]:
     """Fallback: create register blocks from ``#define PERIPH_REG (BASE + offset)`` patterns."""
     # Collect: periph_prefix -> list of (reg_name, offset)
-    periph_regs: dict[str, list[tuple[str, int]]] = {}
+    periph_regs: dict[str, list[Register]] = {}
     for m in _RE_DEFINE_REG_OFFSET.finditer(content):
         prefix = m.group(1)
         reg_name = m.group(2)
-        base_key = m.group(3)
         offset = int(m.group(4), 16)
+        description = _strip_comment_markers(m.group(5) or "")
         # Skip _BASE self-definitions and common non-register suffixes
         if reg_name == "BASE" or reg_name.endswith("_BASE"):
             continue
         if peripheral_name and prefix != peripheral_name:
             continue
-        periph_regs.setdefault(prefix, []).append((reg_name, offset))
+        periph_regs.setdefault(prefix, []).append(Register(
+            name=reg_name,
+            offset=offset,
+            size=32,
+            description=description,
+            access=_infer_access_from_description(description, AccessType.RW),
+            reset_value=0,
+            fields=[],
+        ))
 
     results: dict[str, RegisterBlock] = {}
     for prefix, regs in periph_regs.items():
         base_key = f"{prefix}_BASE"
         base = base_addrs.get(base_key, 0)
-        registers = [
-            Register(name=rn, offset=off, size=32, access=AccessType.RW, reset_value=0, fields=[])
-            for rn, off in sorted(regs, key=lambda x: x[1])
-        ]
+        registers = sorted(regs, key=lambda reg: (reg.offset, reg.name))
         results[prefix] = RegisterBlock(name=prefix, base_address=base, registers=registers)
+    macro_results = _macro_only_register_blocks(
+        content,
+        peripheral_name=peripheral_name,
+        family_expand_count=family_expand_count,
+    )
+    for block_name, macro_block in macro_results.items():
+        if block_name not in results:
+            results[block_name] = macro_block
+            continue
+        existing = results[block_name]
+        by_key = {(reg.name, reg.offset): reg for reg in existing.registers}
+        by_key.update({(reg.name, reg.offset): reg for reg in macro_block.registers})
+        existing.registers = sorted(by_key.values(), key=lambda reg: (reg.offset, reg.name))
     return results
+
+
+_VALUE_SUFFIXES = (
+    "_MASK", "_MSK", "_BIT", "_BITS", "_SHIFT", "_POS", "_POSITION",
+    "_FLAGS", "_EN", "_ENABLE", "_DISABLE", "_DISABLED",
+)
+_VALUE_NAME_PARTS = ("_CMD_", "_COMMAND_")
+_VALUE_TOKENS = {"MODE", "VALUE", "VAL", "OPTION", "OPT", "SEL"}
+
+
+def _macro_only_register_blocks(
+    content: str,
+    *,
+    peripheral_name: str | None = None,
+    family_expand_count: int = 4,
+) -> dict[str, RegisterBlock]:
+    """Create register blocks from macro-only register maps.
+
+    This handles Linux-style headers that define offsets directly, for example
+    ``#define GPU_ID 0x00`` and indexed families such as
+    ``#define JS_HEAD_LO(n) (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00)``.
+    """
+    macros = parse_macros(content)
+    constants = _resolve_numeric_macros(macros)
+
+    requested = peripheral_name.upper() if peripheral_name else None
+    has_requested_prefix = bool(
+        requested
+        and any(
+            not macro.params
+            and macro.name.startswith(f"{requested}_")
+            and _is_direct_register_macro(macro)
+            and _eval_simple_expr(macro.value, constants) is not None
+            for macro in macros
+        )
+    )
+    include_all = bool(requested and has_requested_prefix)
+
+    related_prefixes = _related_macro_prefixes(macros, requested, constants) if requested else set()
+    block_regs: dict[str, list[Register]] = {}
+    target_block = requested
+    for macro in macros:
+        if not macro.params:
+            offset = _eval_simple_expr(macro.value, constants)
+            if offset is None:
+                continue
+            if requested:
+                include = (
+                    macro.name.startswith(f"{requested}_")
+                    and _is_direct_register_macro(macro)
+                )
+                block_name = target_block if include else ""
+            else:
+                prefix = macro.name.split("_", 1)[0]
+                include = _is_direct_register_macro(macro)
+                block_name = prefix
+            if not include or not block_name:
+                continue
+            block_regs.setdefault(block_name, []).append(_register_from_macro(macro, offset))
+            continue
+
+        expanded = _expand_family_macro(
+            macro,
+            constants,
+            count=_infer_family_bound(macro, constants, family_expand_count),
+        )
+        if not expanded:
+            continue
+        if requested:
+            macro_prefix = macro.name.split("_", 1)[0]
+            include = macro.name.startswith(f"{requested}_") or (
+                include_all and macro_prefix in related_prefixes
+            )
+            block_name = target_block if include else ""
+        else:
+            block_name = macro.name.split("_", 1)[0]
+            include = True
+        if not include or not block_name:
+            continue
+        block_regs.setdefault(block_name, []).extend(
+            _register_from_macro(macro, offset, index=index)
+            for index, offset in expanded
+        )
+
+    results: dict[str, RegisterBlock] = {}
+    for block_name, regs in block_regs.items():
+        deduped = {(reg.name, reg.offset): reg for reg in regs}
+        registers = sorted(deduped.values(), key=lambda reg: (reg.offset, reg.name))
+        results[block_name] = RegisterBlock(
+            name=block_name,
+            base_address=0,
+            registers=registers,
+        )
+    return results
+
+
+def _related_macro_prefixes(
+    macros: list[MacroDef],
+    requested: str | None,
+    constants: dict[str, int],
+) -> set[str]:
+    if not requested:
+        return set()
+    related: set[str] = {requested}
+    requested_offsets = [
+        _eval_simple_expr(macro.value, constants)
+        for macro in macros
+        if not macro.params
+        and macro.name.startswith(f"{requested}_")
+        and _is_direct_register_macro(macro)
+    ]
+    requested_offsets = [offset for offset in requested_offsets if offset is not None]
+    if not requested_offsets:
+        return related
+    requested_min = min(requested_offsets)
+    requested_max = max(requested_offsets)
+    direct_prefixes = {
+        macro.name.split("_", 1)[0]
+        for macro in macros
+        if not macro.params
+        and not macro.name.startswith(f"{requested}_")
+        and _is_direct_register_macro(macro)
+    }
+    candidate_prefixes: set[str] = set()
+    for macro in macros:
+        if not macro.params:
+            continue
+        prefix = macro.name.split("_", 1)[0]
+        if prefix in direct_prefixes:
+            continue
+        expanded = _expand_family_macro(macro, constants, count=1)
+        if not expanded:
+            continue
+        first_offset = expanded[0][1]
+        if first_offset >= requested_min and first_offset <= requested_max + 0x10000:
+            candidate_prefixes.add(prefix)
+    if len(candidate_prefixes) == 1:
+        related.update(candidate_prefixes)
+    return related
+
+
+def _register_from_macro(macro: MacroDef, offset: int, *, index: int | None = None) -> Register:
+    name = macro.name if index is None else f"{macro.name}{index}"
+    description = macro.comment
+    return Register(
+        name=name,
+        offset=offset,
+        size=32,
+        description=description,
+        access=_infer_access_from_description(description, AccessType.RW),
+        reset_value=0,
+        fields=[],
+    )
+
+
+def _is_direct_register_macro(macro: MacroDef) -> bool:
+    name = macro.name.upper()
+    if name.endswith(("_BASE", "_OFFSET", "_STRIDE", "_SIZE", "_COUNT", "_NUM")):
+        return False
+    if name.endswith(_VALUE_SUFFIXES):
+        return False
+    if any(part in name for part in _VALUE_NAME_PARTS):
+        return False
+    if "BIT(" in macro.value.upper() or "GENMASK(" in macro.value.upper():
+        return False
+    if _expr_references_identifier(macro.value):
+        return False
+    tokens = name.split("_")
+    if not macro.comment and len(tokens) >= 4 and _VALUE_TOKENS.intersection(tokens):
+        return False
+    value = macro.value.strip()
+    numeric = re.fullmatch(r"\(?\s*(0x[0-9A-Fa-f]+|\d+)[UuLl]*\s*\)?", value)
+    if numeric:
+        raw = numeric.group(1)
+        number = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+        if number % 4 != 0:
+            return False
+    return True
+
+
+def _expr_references_identifier(expr: str) -> bool:
+    text = re.sub(r"/\*.*?\*/", "", expr)
+    text = re.sub(r"//.*$", "", text)
+    text = re.sub(r"(0[xX][0-9A-Fa-f]+|(?<![A-Za-z_])\d+)[UuLl]+", r"\1", text)
+    text = re.sub(r"0[xX][0-9A-Fa-f]+", "", text)
+    text = re.sub(r"\b\d+\b", "", text)
+    return re.search(r"\b[A-Za-z_]\w*\b", text) is not None
+
+
+def _resolve_numeric_macros(macros: list[MacroDef]) -> dict[str, int]:
+    raw = {
+        macro.name: macro.value
+        for macro in macros
+        if not macro.params and not macro.name.endswith(("_MASK", "_MSK"))
+    }
+    resolved: dict[str, int] = {}
+
+    for _ in range(len(raw)):
+        changed = False
+        for name, expr in raw.items():
+            if name in resolved:
+                continue
+            value = _eval_simple_expr(expr, resolved)
+            if value is not None:
+                resolved[name] = value
+                changed = True
+        if not changed:
+            break
+    return resolved
+
+
+def _expand_family_macro(
+    macro: MacroDef,
+    constants: dict[str, int],
+    *,
+    count: int,
+) -> list[tuple[int, int]]:
+    if len(macro.params) != 1:
+        return []
+    if not _is_family_register_macro(macro):
+        return []
+    param = macro.params[0]
+    expanded = []
+    for index in range(max(count, 0)):
+        value = _eval_simple_expr(macro.value, constants | {param: index})
+        if value is None or value % 4 != 0:
+            return []
+        expanded.append((index, value))
+    return expanded
+
+
+def _is_family_register_macro(macro: MacroDef) -> bool:
+    name = macro.name.upper()
+    if name.endswith(_VALUE_SUFFIXES):
+        return False
+    if any(part in name for part in _VALUE_NAME_PARTS):
+        return False
+    expr = macro.value.upper()
+    if "BIT(" in expr or "GENMASK(" in expr:
+        return False
+    if len(macro.params) != 1:
+        return False
+    return re.search(rf"\b{re.escape(macro.params[0])}\b", macro.value) is not None
+
+
+def _infer_family_bound(
+    macro: MacroDef,
+    constants: dict[str, int],
+    default_count: int,
+) -> int:
+    family_prefix = macro.name.split("_", 1)[0]
+    candidates = [
+        f"{family_prefix}_COUNT",
+        f"{family_prefix}_NUM",
+        f"NUM_{family_prefix}",
+        f"{family_prefix}_SLOTS",
+        f"{family_prefix}_SLOT_COUNT",
+    ]
+    for name in candidates:
+        value = constants.get(name)
+        if value and 0 < value <= 64:
+            return value
+    return default_count
+
+
+def _eval_simple_expr(expr: str, constants: dict[str, int]) -> int | None:
+    text = expr.strip()
+    text = re.sub(r"/\*.*?\*/", "", text)
+    text = re.sub(r"//.*$", "", text)
+    text = re.sub(r"(0[xX][0-9A-Fa-f]+|(?<![A-Za-z_])\d+)[UuLl]+", r"\1", text)
+    text = re.sub(
+        r"0[xX][0-9A-Fa-f]+",
+        lambda match: str(int(match.group(0), 16)),
+        text,
+    )
+    for name in sorted(constants, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(name)}\b", str(constants[name]), text)
+    if re.search(r"[A-Za-z_]", text):
+        return None
+    if not re.fullmatch(r"[0-9\s()+\-*/<>|&]+", text):
+        return None
+    return _safe_eval_int(text)
+
+
+_SAFE_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.FloorDiv: operator.floordiv,
+    ast.Div: operator.floordiv,
+    ast.LShift: operator.lshift,
+    ast.RShift: operator.rshift,
+    ast.BitOr: operator.or_,
+    ast.BitAnd: operator.and_,
+}
+_SAFE_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+_MAX_EXPR_ABS_VALUE = 0xFFFFFFFF
+_MAX_SHIFT = 63
+_MAX_AST_NODES = 64
+_MAX_AST_DEPTH = 16
+
+
+def _safe_eval_int(expr: str) -> int | None:
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    if not _ast_within_limits(tree):
+        return None
+    try:
+        value = _eval_ast_int(tree.body)
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return value if 0 <= value <= _MAX_EXPR_ABS_VALUE else None
+
+
+def _ast_within_limits(tree: ast.AST) -> bool:
+    node_count = 0
+    stack: list[tuple[ast.AST, int]] = [(tree, 0)]
+    while stack:
+        node, depth = stack.pop()
+        node_count += 1
+        if node_count > _MAX_AST_NODES or depth > _MAX_AST_DEPTH:
+            return False
+        stack.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
+    return True
+
+
+def _eval_ast_int(node: ast.AST) -> int:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        value = int(node.value)
+    elif isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_UNARYOPS:
+        value = _SAFE_UNARYOPS[type(node.op)](_eval_ast_int(node.operand))
+    elif isinstance(node, ast.BinOp) and type(node.op) in _SAFE_BINOPS:
+        left = _eval_ast_int(node.left)
+        right = _eval_ast_int(node.right)
+        if isinstance(node.op, (ast.LShift, ast.RShift)) and not (0 <= right <= _MAX_SHIFT):
+            raise ValueError("shift too large")
+        if isinstance(node.op, (ast.Div, ast.FloorDiv)) and right == 0:
+            raise ArithmeticError("division by zero")
+        value = _SAFE_BINOPS[type(node.op)](left, right)
+    else:
+        raise TypeError(f"unsupported expression node: {type(node).__name__}")
+    if abs(value) > _MAX_EXPR_ABS_VALUE:
+        raise ValueError("expression value out of range")
+    return value
 
 
 def parse_header_file(
@@ -472,6 +860,7 @@ def parse_header_file(
     *,
     include_dirs: list[str] | None = None,
     defines: dict[str, str] | None = None,
+    family_expand_count: int = 4,
 ) -> dict[str, RegisterBlock]:
     """Parse a C header file and extract register blocks.
 
@@ -484,6 +873,9 @@ def parse_header_file(
         Directories to search when resolving ``#include "file.h"`` directives.
     defines:
         Pre-defined symbols for ``#ifdef``/``#ifndef`` evaluation.
+    family_expand_count:
+        Default number of entries to emit for one-index macro register families
+        when no ``*_COUNT``/``*_NUM`` bound is available.
     """
     try:
         content = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -511,7 +903,12 @@ def parse_header_file(
         # Fallback: if no struct was found for the requested peripheral,
         # try #define-based register extraction.
         if not results:
-            results = _define_based_register_blocks(content, base_addrs, peripheral_name)
+            results = _define_based_register_blocks(
+                content,
+                base_addrs,
+                peripheral_name,
+                family_expand_count=family_expand_count,
+            )
 
         return results
     except Exception as exc:

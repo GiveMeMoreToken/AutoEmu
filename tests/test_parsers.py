@@ -189,6 +189,190 @@ typedef struct {
         assert block.get_register("CCR").access.value == "W1C"
         assert "Control register 1" in block.get_register("CR1").description
 
+    def test_parse_direct_macro_register_offsets_with_access_comments(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID              0x0000 /* (RO) GPU identity */
+#define GPU_IRQ_CLR         0x0020 /* (WO) interrupt clear alias */
+#define GPU_IRQ_CLEAR       0x0024 /* (WO) interrupt clear register */
+#define GPU_COMMAND         0x0030 /* write-only command register */
+#define GPU_STATUS          0x0034 /* read-only status register */
+#define GPU_IRQ_MASK        BIT(1)
+#define GPU_CMD_SOFT_RESET  0x01
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert [reg.name for reg in block.registers] == [
+            "GPU_ID",
+            "GPU_IRQ_CLR",
+            "GPU_IRQ_CLEAR",
+            "GPU_COMMAND",
+            "GPU_STATUS",
+        ]
+        assert block.get_register("GPU_ID").offset == 0x0000
+        assert block.get_register("GPU_ID").access.value == "RO"
+        assert block.get_register("GPU_IRQ_CLR").access.value == "WO"
+        assert block.get_register("GPU_IRQ_CLEAR").access.value == "WO"
+        assert block.get_register("GPU_COMMAND").access.value == "WO"
+        assert block.get_register("GPU_STATUS").access.value == "RO"
+        assert block.get_register("GPU_IRQ_MASK") is None
+        assert block.get_register("GPU_CMD_SOFT_RESET") is None
+
+    def test_parse_macro_only_header_includes_related_unprefixed_families(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID          0x0000 /* (RO) GPU identity */
+#define GPU_STATUS      0x0034
+#define JS_BASE         0x1000
+#define JS_SLOT_STRIDE  0x80
+#define JS_HEAD_LO(n)   (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00) /* (RW) queue head */
+#define JS_HEAD_HI(n)   (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x04)
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert [reg.name for reg in block.registers] == [
+            "GPU_ID",
+            "GPU_STATUS",
+            "JS_HEAD_LO0",
+            "JS_HEAD_HI0",
+            "JS_HEAD_LO1",
+            "JS_HEAD_HI1",
+            "JS_HEAD_LO2",
+            "JS_HEAD_HI2",
+            "JS_HEAD_LO3",
+            "JS_HEAD_HI3",
+        ]
+        assert block.get_register("JS_HEAD_LO0").offset == 0x1000
+        assert block.get_register("JS_HEAD_HI0").offset == 0x1004
+        assert block.get_register("JS_HEAD_LO3").offset == 0x1180
+        assert block.get_register("JS_HEAD_LO0").access.value == "RW"
+
+    def test_macro_register_parser_merges_legacy_and_direct_offsets(self, tmp_path):
+        header = tmp_path / "mixed_regs.h"
+        header.write_text(
+            """\
+#define PERIPH_BASE  (0x40000000UL)
+#define GPU_BASE     (PERIPH_BASE + 0x1000UL)
+#define GPU_STATUS_LEGACY (GPU_BASE + 0x0034U) /* (RO) legacy status */
+#define GPU_ID       0x0000 /* (RO) identity register */
+#define GPU_CONTROL  0x0030 /* (RW) control register */
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.base_address == 0x40001000
+        assert block.get_register("STATUS_LEGACY").offset == 0x0034
+        assert block.get_register("STATUS_LEGACY").access.value == "RO"
+        assert block.get_register("GPU_ID").offset == 0x0000
+        assert block.get_register("GPU_CONTROL").offset == 0x0030
+        assert block.get_register("GPU_STATUS_LEGACY") is None
+
+    def test_macro_register_parser_filters_aligned_values_and_masks(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID                 0x0000 /* (RO) identity register */
+#define GPU_STATUS             0x0034 /* status register */
+#define GPU_CONFIG_MODE_MANUAL 0x0004
+#define GPU_ALL_BITS           ~0
+#define GPU_MODE_FLAGS         0xffff
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert [reg.name for reg in block.registers] == ["GPU_ID", "GPU_STATUS"]
+        assert block.get_register("GPU_CONFIG_MODE_MANUAL") is None
+        assert block.get_register("GPU_ALL_BITS") is None
+        assert block.get_register("GPU_MODE_FLAGS") is None
+
+    def test_macro_parser_handles_hex_suffixes_and_excludes_unrelated_blocks(self, tmp_path):
+        header = tmp_path / "mixed_soc_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID          0x0000U /* (RO) identity register */
+#define GPU_STATUS      0x000CU /* status register */
+#define JS_BASE         0x1000U
+#define JS_SLOT_STRIDE  0x80U
+#define JS_HEAD_LO(n)   (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00U)
+#define USB_CTRL        0x2000U
+#define USB_BASE        0x2000U
+#define USB_STRIDE      0x20U
+#define USB_CTRL_INDEX(n) (USB_BASE + ((n) * USB_STRIDE) + 0x00U)
+#define CLK_GATE        0x3000U
+#define CLK_BASE        0x3000U
+#define CLK_STRIDE      0x10U
+#define CLK_GATE_INDEX(n) (CLK_BASE + ((n) * CLK_STRIDE) + 0x00U)
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.get_register("GPU_STATUS").offset == 0x000C
+        assert block.get_register("JS_HEAD_LO0").offset == 0x1000
+        assert block.get_register("USB_CTRL") is None
+        assert block.get_register("USB_CTRL_INDEX0") is None
+        assert block.get_register("CLK_GATE") is None
+        assert block.get_register("CLK_GATE_INDEX0") is None
+
+    def test_macro_expression_evaluator_rejects_expensive_expressions(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        long_expr = " + ".join(["1"] * 1000)
+        header.write_text(
+            f"""\
+#define GPU_ID       0x0000U
+#define GPU_HUGE     (1 << 128)
+#define GPU_DEEP     ({long_expr})
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.get_register("GPU_ID") is not None
+        assert block.get_register("GPU_HUGE") is None
+        assert block.get_register("GPU_DEEP") is None
+
+    def test_macro_parser_rejects_lowercase_suffixed_unaligned_values(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID       0x0000u
+#define GPU_FLAG     0x1u
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.get_register("GPU_ID") is not None
+        assert block.get_register("GPU_FLAG") is None
+
+    def test_macro_parser_excludes_ambiguous_indexed_families(self, tmp_path):
+        header = tmp_path / "mixed_soc_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID          0x0000U
+#define GPU_STATUS      0x000CU
+#define JS_BASE         0x1000U
+#define JS_SLOT_STRIDE  0x80U
+#define JS_HEAD_LO(n)   (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00U)
+#define DMA_BASE        0x2000U
+#define DMA_STRIDE      0x40U
+#define DMA_CH_CFG(n)   (DMA_BASE + ((n) * DMA_STRIDE) + 0x00U)
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.get_register("DMA_CH_CFG0") is None
+        assert block.get_register("JS_HEAD_LO0") is None
+
 
 class TestRegisterExtractor:
     def test_merge_register_blocks_prefers_semantic_primary(self):

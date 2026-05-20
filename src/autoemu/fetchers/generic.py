@@ -315,6 +315,12 @@ def _score_result(result: SearchResult, category: str, mcu: str, peripheral: str
             score += 10
         if "register" in title_lower:
             score += 5
+        if "linux" in title_lower or "torvalds" in url_lower:
+            score += 5
+        if any(term in title_lower or term in url_lower for term in ("regs.h", "reg.h", "registers.h")):
+            score += 8
+        if "raw.githubusercontent.com" in url_lower and "/drivers/" in url_lower:
+            score += 5
     elif category == "docs":
         if ".pdf" in url_lower:
             score += 10
@@ -347,41 +353,10 @@ class GenericDataFetcher:
         self.search_timeout = search_timeout
         self.max_results_per_query = max_results_per_query
 
-    # Known raw source URLs for well-known Linux kernel drivers, keyed by
-    # (vendor_substring, peripheral_keyword) → list of (url, category).
-    # These supplement web search when the platform is recognised.
+    # Optional URL seed table. Kept empty by default so generic discovery is
+    # driven by platform analysis, queries, and scoring rather than hardcoded
+    # hardware-specific sources.
     _KNOWN_DRIVER_URLS: list[tuple[str, str, str, str]] = [
-        # (vendor_match, peripheral_match, url, category)
-        # HiSilicon / Kirin — Mali G71 (Bifrost) via panfrost
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.c",
-         "driver"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.h",
-         "header"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_regs.h",
-         "header"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_job.c",
-         "driver"),
-        # HiSilicon / Kirin — ADE display engine (kirin_drm_dss was never in mainline)
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_ade.c",
-         "driver"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_ade_reg.h",
-         "header"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.c",
-         "driver"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.h",
-         "header"),
-        # STM32 — common peripheral headers from cmsis-svd / stm32-rs
-        ("stm32", "uart",
-         "https://raw.githubusercontent.com/stm32-rs/stm32-rs/master/stm32f4/src/stm32f407/usart1.rs",
-         "docs"),
     ]
 
     def _known_candidates(self, mcu: str, peripheral: str) -> list[SearchCandidate]:
@@ -425,6 +400,11 @@ class GenericDataFetcher:
         queries.append((f"{mcu} {peripheral} register header .h site:github.com", "header"))
         queries.append((f"{mcu} register map header definition", "header"))
         queries.append((f"site:raw.githubusercontent.com {mcu} {peripheral} .h", "header"))
+        queries.append((f"site:raw.githubusercontent.com linux {peripheral} regs.h", "header"))
+        queries.append((f"site:raw.githubusercontent.com linux {peripheral} reg.h registers.h", "header"))
+        queries.append((f"linux kernel {peripheral} regmap header", "header"))
+        for term in extra_terms[:2]:
+            queries.append((f"linux kernel {term} {peripheral} regs.h", "header"))
 
         # Documentation queries (broad: include vendor terms)
         queries.append((f"{mcu} {peripheral} datasheet register map", "docs"))

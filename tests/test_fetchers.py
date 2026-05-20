@@ -9,6 +9,7 @@ from autoemu.fetchers.generic import (
     SearchResult,
     GenericDataFetcher,
     DuckDuckGoSearcher,
+    _score_result,
     infer_stm32_mcu_family,
     normalize_target_peripheral,
     peripheral_search_tokens,
@@ -61,6 +62,35 @@ def test_generic_fetcher_discover_scores_candidates():
     # Higher-scored candidates come first
     scores = [c.score for c in candidates]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_header_scoring_prefers_linux_regmap_headers():
+    linux_header = SearchResult(
+        title="Linux kernel panfrost GPU register definitions",
+        url="https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_regs.h",
+    )
+    generic_page = SearchResult(
+        title="GPU overview",
+        url="https://example.com/gpu",
+    )
+
+    assert _score_result(linux_header, "header", "ExampleSoC", "GPU") > _score_result(
+        generic_page, "header", "ExampleSoC", "GPU"
+    )
+
+
+def test_build_queries_include_generic_linux_regmap_headers():
+    fetcher = GenericDataFetcher(searcher=FakeSearcher([]))
+
+    queries = fetcher._build_queries("ExampleSoC", "GPU")
+    header_queries = [query for query, category in queries if category == "header"]
+
+    assert any("linux" in query.lower() and "regs.h" in query.lower() for query in header_queries)
+    assert any("regmap" in query.lower() for query in header_queries)
+
+
+def test_generic_fetcher_has_no_hardware_specific_seed_urls():
+    assert GenericDataFetcher._KNOWN_DRIVER_URLS == []
 
 
 def test_resolve_fetched_input_bundle_from_manifest(tmp_path):
