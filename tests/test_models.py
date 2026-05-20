@@ -258,6 +258,25 @@ class TestQEMUHardwareModel:
         assert model.device_tree.reg[0].size == 0x10
         assert model.device_tree.compatible == ["demosoc,accel"]
 
+    def test_builder_preserves_zero_peripheral_base_address(self):
+        peripheral = Peripheral(
+            name="ZEROBASE",
+            base_address=0,
+            address_size=0x20,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(
+                name="ZEROBASE",
+                base_address=0x40010000,
+                registers=[Register(name="CTRL", offset=0x00)],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert model.mmio_regions[0].base_address == 0
+        assert model.device_tree.unit_address == "0"
+        assert model.device_tree.reg[0].base_address == 0
+
     def test_builder_uses_deduped_driver_compatible_and_irq_hints(self):
         peripheral = Peripheral(
             name="SENSOR",

@@ -98,7 +98,7 @@ def build_qemu_hardware_model(
     c_prefix = f"{prefix}_{peripheral_snake}"
     c_upper = c_prefix.upper()
 
-    base_address = peripheral.base_address or peripheral.register_block.base_address
+    base_address = peripheral.base_address
     size = peripheral.address_size or _infer_address_size(peripheral)
     mmio_region = QEMUMMIORegion(
         name="mmio",
