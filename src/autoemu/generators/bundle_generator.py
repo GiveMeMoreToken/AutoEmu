@@ -27,6 +27,10 @@ from autoemu.models.state_machine import StateMachine
 from autoemu.parsers.driver_parser import DriverAnalysis, RegisterAccess, analyze_driver_file
 from autoemu.validators.behavior_validator import validate_behavior
 from autoemu.validators.compile_validator import validate_compile
+from autoemu.validators.artifact_validator import (
+    validate_generated_artifact_files,
+    validate_qemu_hardware_model,
+)
 from autoemu.validators.register_validator import validate_register_block
 
 
@@ -107,6 +111,8 @@ def verify_peripheral_consistency(
     """Run register, behavior, and replay-based validation checks."""
     driver_data = normalize_driver_analysis(driver_analysis) if driver_analysis is not None else {}
     register_issues = validate_register_block(peripheral.register_block)
+    qemu_hardware = build_qemu_hardware_model(peripheral, driver_data if driver_data else None)
+    hardware_issues = validate_qemu_hardware_model(qemu_hardware)
     behavior_issues = validate_behavior(peripheral, driver_data) if driver_data else []
     replay: dict[str, Any]
     replay = replay_driver_accesses(
@@ -118,10 +124,16 @@ def verify_peripheral_consistency(
         "mismatches": [],
     }
 
-    issue_count = len(register_issues) + len(behavior_issues) + len(replay["mismatches"])
+    issue_count = (
+        len(register_issues)
+        + len(hardware_issues)
+        + len(behavior_issues)
+        + len(replay["mismatches"])
+    )
     return {
         "success": issue_count == 0,
         "register_issues": register_issues,
+        "hardware_issues": hardware_issues,
         "behavior_issues": behavior_issues,
         "driver_replay": replay,
         "issue_count": issue_count,
@@ -250,6 +262,11 @@ def generate_model_bundle(
     )
 
     validation_report = verify_peripheral_consistency(peripheral, driver_analysis)
+    artifact_issues = validate_generated_artifact_files(generated_files)
+    validation_report["artifact_issues"] = artifact_issues
+    validation_report["issue_count"] += len(artifact_issues)
+    if artifact_issues:
+        validation_report["success"] = False
     validation_report["compile_validation"] = compile_result
     validation_path = output_path / f"{snake}_validation.json"
     validation_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")

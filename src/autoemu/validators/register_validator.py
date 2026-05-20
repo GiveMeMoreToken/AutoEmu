@@ -22,6 +22,14 @@ def validate_register_block(block: RegisterBlock) -> list[dict[str, Any]]:
     """
     issues: list[dict[str, Any]] = []
 
+    if not block.registers:
+        issues.append(
+            {
+                "severity": "error",
+                "message": f"Register block {block.name} must contain at least one register",
+            }
+        )
+
     # Check for duplicate register names
     names = [r.name for r in block.registers]
     seen: set[str] = set()

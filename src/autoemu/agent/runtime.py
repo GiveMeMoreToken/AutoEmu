@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -19,7 +18,16 @@ from autoemu.fetchers.generic import (
 )
 from autoemu.modeling_utils import normalize_name as _snake
 from autoemu.pipeline import run_target_model_pipeline
-from autoemu.validators.compile_validator import validate_compile, find_qemu_include_paths, QEMU_SOURCE_DIR
+from autoemu.validators.artifact_validator import (
+    error_messages,
+    validate_output_directory_artifacts,
+    warning_messages,
+)
+from autoemu.validators.compile_validator import (
+    QEMU_SOURCE_DIR,
+    find_qemu_include_paths,
+    validate_compile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -562,33 +570,35 @@ class AutoEmuAgentRuntime:
     ) -> dict[str, Any]:
         _log = on_progress or _noop_progress
         source_dir = Path(output_dir)
-        extra_warnings: list[str] = []
 
         if not source_dir.exists():
             _log("No output directory found", "warn")
-            return {"success": False, "files_checked": 0, "errors": [], "warnings": ["No output directory"]}
+        structural = validate_output_directory_artifacts(source_dir)
+        artifact_issues = structural["artifact_issues"]
+        hardware_issues = structural["hardware_issues"]
+        structural_issues = artifact_issues + hardware_issues
+        structural_errors = error_messages(structural_issues)
+        structural_warnings = warning_messages(structural_issues)
+        files = [Path(path) for path in structural["source_files"]]
 
-        # Check for empty peripheral models (zero registers = unusable QEMU device)
-        for model_file in source_dir.glob("*_peripheral.json"):
-            try:
-                model = json.loads(model_file.read_text(encoding="utf-8"))
-                regs = model.get("register_block", {}).get("registers", [])
-                base = model.get("base_address", 0)
-                if not regs:
-                    extra_warnings.append(
-                        f"{model_file.name} has 0 registers — generated MMIO device will reject all accesses"
-                    )
-                if not base:
-                    extra_warnings.append(
-                        f"{model_file.name} has base_address=0 — likely incorrect"
-                    )
-            except Exception:
-                pass
+        for err in structural_errors:
+            _log(f"  FAIL: {err}", "fail")
+        for warning in structural_warnings:
+            _log(f"  WARN: {warning}", "warn")
 
-        files = list(source_dir.glob("*.c")) + list(source_dir.glob("*.h"))
+        base_result: dict[str, Any] = {
+            "success": not structural_errors,
+            "files_checked": 0,
+            "errors": structural_errors,
+            "warnings": structural_warnings,
+            "artifact_issues": artifact_issues,
+            "hardware_issues": hardware_issues,
+            "generated_source_files": len(files),
+        }
+
         if not files:
-            _log("No C/H files to validate", "warn")
-            return {"success": True, "files_checked": 0, "errors": [], "warnings": ["No C/H files to validate"] + extra_warnings}
+            _log("No generated C/H files found", "fail")
+            return base_result
 
         # Check QEMU source availability before logging per-file messages so we
         # don't emit "Compiling: foo.c" lines when nothing will actually be compiled.
@@ -600,32 +610,37 @@ class AutoEmuAgentRuntime:
             )
             all_warnings = [
                 f"QEMU source tree not found at {QEMU_SOURCE_DIR}; skipping compilation check"
-            ] + extra_warnings
+            ] + structural_warnings
             for w in all_warnings:
                 _log(f"  WARN: {w}", "warn")
-            result: dict[str, Any] = {"success": True, "files_checked": 0, "errors": [], "warnings": all_warnings}
-            if extra_warnings:
-                result["success"] = False
-            return result
+            base_result["warnings"] = all_warnings
+            base_result["success"] = not structural_errors
+            return base_result
 
         _log(f"Checking {len(files)} file(s) against QEMU v9.2.4 headers ...", "compile")
         for f in files:
-            _log(f"  Compiling: {f.name}", "compile")
+            _log(f"  Compiling: {f.relative_to(source_dir)}", "compile")
 
         compile_result: dict[str, Any] = validate_compile(files)
         for err in compile_result.get("errors", []):
             fname = Path(err.get("file", "")).name
             stderr_line = err.get("stderr", "").split("\n")[0][:120]
             _log(f"  FAIL: {fname} — {stderr_line}", "fail")
-        all_warnings = compile_result.get("warnings", []) + extra_warnings
+        all_warnings = compile_result.get("warnings", []) + structural_warnings
         for w in all_warnings:
             _log(f"  WARN: {w}", "warn")
         ok = compile_result.get("files_checked", 0) - len(compile_result.get("errors", []))
-        _log(f"  {ok} passed, {len(compile_result.get('errors', []))} failed, {len(all_warnings)} warning(s)", "compile")
+        failed = len(compile_result.get("errors", []))
+        _log(
+            f"  {ok} passed, {failed} failed, {len(all_warnings)} warning(s)",
+            "compile",
+        )
         compile_result["warnings"] = all_warnings
-        # An empty register model produces a non-functional QEMU device —
-        # treat it as a validation failure so the TUI shows a red status.
-        if extra_warnings:
+        compile_result["errors"] = structural_errors + compile_result.get("errors", [])
+        compile_result["artifact_issues"] = artifact_issues
+        compile_result["hardware_issues"] = hardware_issues
+        compile_result["generated_source_files"] = len(files)
+        if structural_errors:
             compile_result["success"] = False
         return compile_result
 

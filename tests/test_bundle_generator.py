@@ -141,6 +141,47 @@ def test_generate_model_bundle_writes_artifacts_and_validation(tmp_path):
     assert result["validation_report"]["driver_replay"]["applied_operations"] >= 1
 
 
+def test_verify_peripheral_consistency_rejects_empty_hardware_structure():
+    peripheral = build_peripheral_from_models(
+        "EMPTY",
+        {"EMPTY": RegisterBlock(name="EMPTY", base_address=0x40010000, registers=[])},
+        mcu_family="DemoSoC",
+    )
+
+    report = verify_peripheral_consistency(peripheral)
+
+    assert report["success"] is False
+    assert report["issue_count"] >= 1
+    assert any(issue["severity"] == "error" for issue in report["register_issues"])
+    hardware_messages = " ".join(issue["message"].lower() for issue in report["hardware_issues"])
+    assert "mmio" in hardware_messages
+    assert "size" in hardware_messages
+    assert "register_count" in hardware_messages
+
+
+def test_generate_model_bundle_reports_empty_tree_artifacts(monkeypatch, tmp_path):
+    def fake_tree_artifacts(peripheral, output_dir, **kwargs):
+        empty_tree_source = Path(output_dir) / "hw" / "misc" / "empty_device.c"
+        empty_tree_source.parent.mkdir(parents=True, exist_ok=True)
+        empty_tree_source.write_text("", encoding="utf-8")
+        return [str(empty_tree_source)]
+
+    monkeypatch.setattr(
+        "autoemu.generators.bundle_generator.generate_qemu_tree_artifacts",
+        fake_tree_artifacts,
+    )
+
+    result = generate_model_bundle("USART1", _make_registers(), output_dir=tmp_path)
+
+    assert result["validation_report"]["success"] is False
+    assert any(
+        issue["severity"] == "error"
+        and issue.get("path", "").endswith("hw/misc/empty_device.c")
+        and "empty" in issue["message"].lower()
+        for issue in result["validation_report"]["artifact_issues"]
+    )
+
+
 def test_verify_peripheral_consistency_ignores_descriptor_pseudo_registers():
     peripheral = build_peripheral_from_models(
         "ETH",

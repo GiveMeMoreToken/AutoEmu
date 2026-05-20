@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -249,3 +251,128 @@ def test_run_pipeline_per_mcu_data_dirs(monkeypatch):
     runtime.run_pipeline(target_mcu="STM32F407VG", target_peripheral="ETH")
     assert dirs[-2] == "data/stm32f407vg"  # fetch
     assert dirs[-1] == "data/stm32f407vg"  # build
+
+
+# ---------------------------------------------------------------------------
+# Runtime validation
+# ---------------------------------------------------------------------------
+
+
+def _valid_qemu_hardware_json() -> dict:
+    return {
+        "identity": {
+            "peripheral_name": "DEMO",
+            "qom_type": "demo-device",
+            "c_identifier_prefix": "demo_device",
+            "type_macro": "TYPE_DEMO_DEVICE",
+            "state_struct_name": "DemoDeviceState",
+            "kconfig_symbol": "DEMO_DEVICE",
+        },
+        "file_layout": {
+            "source_path": "hw/misc/demo_device.c",
+            "header_path": "include/hw/misc/demo_device.h",
+            "meson_path": "hw/misc/meson.build",
+            "meson_snippet_path": "hw/misc/demo_device.meson.inc",
+            "qtest_path": "tests/qtest/demo_device-test.c",
+        },
+        "mmio_regions": [
+            {
+                "name": "mmio",
+                "base_address": 0x40010000,
+                "size": 0x10,
+                "register_count": 1,
+            }
+        ],
+        "irq_resources": [],
+        "device_tree": {
+            "node_name": "demo",
+            "unit_address": "40010000",
+            "address_cells": 1,
+            "size_cells": 1,
+            "compatible": ["demo,device"],
+            "reg": [
+                {
+                    "name": "mmio",
+                    "base_address": 0x40010000,
+                    "size": 0x10,
+                }
+            ],
+            "interrupt_names": [],
+            "properties": {},
+        },
+    }
+
+
+def _write_valid_qemu_hardware(path: Path) -> None:
+    path.write_text(json.dumps(_valid_qemu_hardware_json()), encoding="utf-8")
+
+
+def _write_nested_c_h_files(base: Path) -> None:
+    source = base / "hw" / "misc" / "demo_device.c"
+    header = base / "include" / "hw" / "misc" / "demo_device.h"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    header.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("int demo_device_init(void) { return 0; }\n", encoding="utf-8")
+    header.write_text("#pragma once\nint demo_device_init(void);\n", encoding="utf-8")
+
+
+def test_do_validate_recurses_generated_sources_when_qemu_tree_missing(monkeypatch, tmp_path):
+    _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
+    _write_nested_c_h_files(tmp_path)
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is True
+    assert result["generated_source_files"] == 2
+    assert result["files_checked"] == 0
+    assert any("skipping compilation check" in warning.lower() for warning in result["warnings"])
+    assert not any("no c/h files" in warning.lower() for warning in result["warnings"])
+
+
+def test_do_validate_fails_when_no_generated_sources(monkeypatch, tmp_path):
+    _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert result["generated_source_files"] == 0
+    assert any("no generated c/h files" in error.lower() for error in result["errors"])
+
+
+def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):
+    _write_nested_c_h_files(tmp_path)
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert any("qemu hardware" in error.lower() for error in result["errors"])
+    assert any("skipping compilation check" in warning.lower() for warning in result["warnings"])
+
+
+def test_do_validate_fails_on_empty_qemu_hardware_json_when_compile_skipped(monkeypatch, tmp_path):
+    (tmp_path / "demo_qemu_hardware.json").write_text("", encoding="utf-8")
+    _write_nested_c_h_files(tmp_path)
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert any("empty" in error.lower() for error in result["errors"])
+    assert any("qemu hardware" in error.lower() for error in result["errors"])
+
+
+def test_do_validate_fails_on_incomplete_qemu_hardware_json(monkeypatch, tmp_path):
+    (tmp_path / "demo_qemu_hardware.json").write_text(
+        json.dumps({"identity": {"peripheral_name": "DEMO"}}),
+        encoding="utf-8",
+    )
+    _write_nested_c_h_files(tmp_path)
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert any("incomplete or invalid" in error.lower() for error in result["errors"])
