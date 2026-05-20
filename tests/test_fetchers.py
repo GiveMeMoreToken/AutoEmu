@@ -140,3 +140,27 @@ def test_resolve_fetched_input_bundle_flat_layout(tmp_path):
     )
     assert bundle.svd_path == str(svd)
     assert len(bundle.driver_paths) == 1
+
+
+def test_resolve_fetched_input_bundle_prefers_peripheral_register_header(tmp_path):
+    data_dir = tmp_path / "data"
+    (data_dir / "header").mkdir(parents=True)
+    (data_dir / "driver").mkdir(parents=True)
+
+    stale_board_header = data_dir / "header" / "board_private.h"
+    register_header = data_dir / "header" / "panfrost_regs.h"
+    driver = data_dir / "driver" / "panfrost_device.c"
+    stale_board_header.write_text("#define BOARD_ID 0x960\n", encoding="utf-8")
+    register_header.write_text(
+        "#define GPU_ID 0x000\n"
+        "#define GPU_STATUS 0x034\n"
+        "#define GPU_INT_MASK 0x028\n",
+        encoding="utf-8",
+    )
+    driver.write_text("void panfrost_gpu_init(void) {}\n", encoding="utf-8")
+
+    bundle = resolve_fetched_input_bundle(
+        target_mcu="Hikey960", target_peripheral="GPU", data_dir=data_dir,
+    )
+
+    assert bundle.header_path == str(register_header)

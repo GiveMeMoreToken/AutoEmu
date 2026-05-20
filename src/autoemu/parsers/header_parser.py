@@ -725,6 +725,9 @@ def _expand_family_macro(
     if not _is_family_register_macro(macro):
         return []
     param = macro.params[0]
+    zero_offset = _eval_simple_expr(macro.value, constants | {param: 0})
+    if zero_offset is None or zero_offset <= 0:
+        return []
     expanded = []
     for index in range(max(count, 0)):
         value = _eval_simple_expr(macro.value, constants | {param: index})

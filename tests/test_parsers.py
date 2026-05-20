@@ -253,6 +253,25 @@ typedef struct {
         assert block.get_register("JS_HEAD_LO3").offset == 0x1180
         assert block.get_register("JS_HEAD_LO0").access.value == "RW"
 
+    def test_macro_register_parser_excludes_function_like_value_helpers(self, tmp_path):
+        header = tmp_path / "gpu_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID                  0x0000 /* (RO) GPU identity */
+#define GPU_PERFCNT_CFG         0x0068
+#define GPU_PERFCNT_CFG_AS(x)   ((x) << 4)
+#define GPU_PERFCNT_CFG_SETSEL(x) ((x) << 8)
+#define GPU_TEXTURE_FEATURES(n) (0x0B0 + ((n) * 4))
+"""
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+
+        assert block.get_register("GPU_PERFCNT_CFG") is not None
+        assert block.get_register("GPU_TEXTURE_FEATURES0") is not None
+        assert block.get_register("GPU_PERFCNT_CFG_AS0") is None
+        assert block.get_register("GPU_PERFCNT_CFG_SETSEL0") is None
+
     def test_macro_register_parser_merges_legacy_and_direct_offsets(self, tmp_path):
         header = tmp_path / "mixed_regs.h"
         header.write_text(

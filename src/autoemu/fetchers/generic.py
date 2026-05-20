@@ -260,10 +260,61 @@ def resolve_fetched_input_bundle(
         target_peripheral=target_peripheral,
         manifest_path=str(manifest_path),
         svd_path=svds[0] if svds else "",
-        header_path=headers[0] if headers else "",
+        header_path=_select_best_input_file(headers, target_peripheral, category="header"),
         driver_paths=tuple(drivers),
         documentation_paths=tuple(docs),
     )
+
+
+def _select_best_input_file(
+    paths: list[str],
+    target_peripheral: str,
+    *,
+    category: str,
+) -> str:
+    """Choose the most target-relevant file while preserving order on ties."""
+    if not paths:
+        return ""
+    ranked = [
+        (_score_resolved_input_file(path, target_peripheral, category=category), -index, path)
+        for index, path in enumerate(paths)
+    ]
+    return max(ranked)[2]
+
+
+def _score_resolved_input_file(path: str, target_peripheral: str, *, category: str) -> int:
+    if category != "header":
+        return 0
+
+    path_obj = Path(path)
+    name = path_obj.name.lower()
+    tokens = peripheral_search_tokens(target_peripheral)
+    condensed = "".join(ch.lower() for ch in target_peripheral if ch.isalnum())
+    score = 0
+
+    if condensed and condensed in name:
+        score += 50
+    if any(token and token in name for token in tokens):
+        score += 30
+    if any(marker in name for marker in ("reg", "regs", "register", "regmap")):
+        score += 25
+    if any(marker in name for marker in ("private", "board", "platform")):
+        score -= 10
+
+    try:
+        sample = path_obj.read_text(encoding="utf-8", errors="replace")[:65536]
+    except OSError:
+        return score
+
+    upper = (condensed or target_peripheral).upper()
+    if re.search(rf"^\s*#\s*define\s+{re.escape(upper)}_[A-Za-z0-9_]*\s+0x", sample, re.MULTILINE):
+        score += 100
+    if re.search(rf"\b{re.escape(upper)}_[A-Za-z0-9_]+\b", sample):
+        score += 25
+    if "#define" in sample and "0x" in sample:
+        score += 10
+
+    return score
 
 
 @dataclass
