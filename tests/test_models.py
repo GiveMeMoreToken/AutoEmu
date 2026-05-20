@@ -1,11 +1,19 @@
 """Tests for data models."""
 
+import pytest
+from pydantic import ValidationError
+
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
 from autoemu.models.state_machine import State, Transition, StateMachine
 from autoemu.models.interrupt import InterruptLine, InterruptModel
 from autoemu.models.dependency import DependencyEdge, DependencyGraph, DependencyType
 from autoemu.models.peripheral import Peripheral
-from autoemu.models.qemu import build_qemu_hardware_model
+from autoemu.models.qemu import (
+    QEMUDeviceTreeRegRegion,
+    QEMUIRQResource,
+    QEMUMMIORegion,
+    build_qemu_hardware_model,
+)
 
 
 class TestBitField:
@@ -277,6 +285,45 @@ class TestQEMUHardwareModel:
         assert model.device_tree.unit_address == "0"
         assert model.device_tree.reg[0].base_address == 0
 
+    def test_builder_uses_64_bit_address_cells_for_high_mmio_range(self):
+        peripheral = Peripheral(
+            name="HIGHADDR",
+            base_address=0x1_0000_0000,
+            address_size=0x100,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(
+                name="HIGHADDR",
+                base_address=0x1_0000_0000,
+                registers=[Register(name="CTRL", offset=0x00)],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert model.device_tree.address_cells == 2
+        assert model.device_tree.size_cells == 1
+        assert model.device_tree.reg[0].base_address == 0x1_0000_0000
+        assert model.device_tree.reg[0].size == 0x100
+
+    def test_builder_uses_64_bit_size_cells_for_large_mmio_size(self):
+        peripheral = Peripheral(
+            name="LARGESIZE",
+            base_address=0x40000000,
+            address_size=0x1_0000_0000,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(
+                name="LARGESIZE",
+                base_address=0x40000000,
+                registers=[Register(name="CTRL", offset=0x00)],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert model.device_tree.address_cells == 2
+        assert model.device_tree.size_cells == 2
+        assert model.device_tree.reg[0].size == 0x1_0000_0000
+
     def test_builder_uses_deduped_driver_compatible_and_irq_hints(self):
         peripheral = Peripheral(
             name="SENSOR",
@@ -311,6 +358,35 @@ class TestQEMUHardwareModel:
         assert model.irq_resources[1].source == "platform"
         assert model.device_tree.interrupt_names == ["done", "error"]
 
+    def test_builder_ignores_empty_state_hints(self):
+        peripheral = Peripheral(
+            name="SENSOR",
+            base_address=0x50000000,
+            address_size=0x100,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(name="SENSOR", base_address=0x50000000),
+            interrupt_model=InterruptModel(
+                peripheral_name="SENSOR",
+                lines=[InterruptLine(irq_number=9, name="fallback")],
+            ),
+        )
+
+        model = build_qemu_hardware_model(
+            peripheral,
+            {
+                "state_hints": [
+                    {"kind": "compatible", "value": None},
+                    {"kind": "compatible", "value": "  "},
+                    {"kind": "irq_resource", "name": None},
+                    {"kind": "irq_resource", "name": "  "},
+                ],
+            },
+        )
+
+        assert model.device_tree.compatible == ["demosoc,sensor"]
+        assert [irq.name for irq in model.irq_resources] == ["fallback"]
+        assert model.device_tree.interrupt_names == ["fallback"]
+
     def test_builder_falls_back_to_interrupt_model_lines_for_irq_resources(self):
         peripheral = Peripheral(
             name="TIMER",
@@ -333,3 +409,38 @@ class TestQEMUHardwareModel:
         assert [irq.index for irq in model.irq_resources] == [0, 1]
         assert [irq.irq_number for irq in model.irq_resources] == [7, 8]
         assert model.device_tree.interrupt_names == ["timer_update", "timer_capture"]
+
+    def test_builder_converts_unknown_interrupt_model_irq_numbers_to_none(self):
+        peripheral = Peripheral(
+            name="UNKNOWNIRQ",
+            base_address=0x40000000,
+            address_size=0x40,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(name="UNKNOWNIRQ", base_address=0x40000000),
+            interrupt_model=InterruptModel(
+                peripheral_name="UNKNOWNIRQ",
+                lines=[InterruptLine(irq_number=-1, name="unknown_irq")],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert [irq.name for irq in model.irq_resources] == ["unknown_irq"]
+        assert model.irq_resources[0].irq_number is None
+        assert model.device_tree.interrupt_names == ["unknown_irq"]
+
+    @pytest.mark.parametrize(
+        ("model_type", "kwargs"),
+        [
+            (QEMUMMIORegion, {"name": "mmio", "base_address": -1, "size": 1, "register_count": 1}),
+            (QEMUMMIORegion, {"name": "mmio", "base_address": 0, "size": -1, "register_count": 1}),
+            (QEMUMMIORegion, {"name": "mmio", "base_address": 0, "size": 1, "register_count": -1}),
+            (QEMUDeviceTreeRegRegion, {"name": "mmio", "base_address": -1, "size": 1}),
+            (QEMUDeviceTreeRegRegion, {"name": "mmio", "base_address": 0, "size": -1}),
+            (QEMUIRQResource, {"name": "irq", "index": -1, "irq_number": 1}),
+            (QEMUIRQResource, {"name": "irq", "index": 0, "irq_number": -1}),
+        ],
+    )
+    def test_qemu_resources_reject_negative_numeric_fields(self, model_type, kwargs):
+        with pytest.raises(ValidationError):
+            model_type(**kwargs)

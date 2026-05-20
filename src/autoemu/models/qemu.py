@@ -39,17 +39,17 @@ class QEMUMMIORegion(BaseModel):
     """A memory-mapped IO region exported by the QEMU device."""
 
     name: str
-    base_address: int
-    size: int
-    register_count: int
+    base_address: int = Field(ge=0)
+    size: int = Field(ge=0)
+    register_count: int = Field(ge=0)
 
 
 class QEMUIRQResource(BaseModel):
     """A named interrupt resource exposed by the device."""
 
     name: str
-    index: int
-    irq_number: int | None = None
+    index: int = Field(ge=0)
+    irq_number: int | None = Field(default=None, ge=0)
     source: str | None = None
 
 
@@ -57,8 +57,8 @@ class QEMUDeviceTreeRegRegion(BaseModel):
     """Device Tree reg entry corresponding to an MMIO region."""
 
     name: str
-    base_address: int
-    size: int
+    base_address: int = Field(ge=0)
+    size: int = Field(ge=0)
 
 
 class QEMUDeviceTreeNode(BaseModel):
@@ -115,13 +115,15 @@ def build_qemu_hardware_model(
     compatible = _dedupe(
         [
             *(
-                hint.get("value", "").strip()
+                _clean_hint_string(hint.get("value"))
                 for hint in state_hints
                 if hint.get("kind") == "compatible"
             ),
             _fallback_compatible(prefix, peripheral_snake),
         ]
     )
+    address_cells = _device_tree_address_cells([mmio_region])
+    size_cells = _device_tree_size_cells([mmio_region])
 
     return QEMUHardwareModel(
         identity=QEMUDeviceIdentity(
@@ -144,8 +146,8 @@ def build_qemu_hardware_model(
         device_tree=QEMUDeviceTreeNode(
             node_name=peripheral_snake,
             unit_address=f"{base_address:x}",
-            address_cells=1,
-            size_cells=1,
+            address_cells=address_cells,
+            size_cells=size_cells,
             compatible=compatible,
             reg=[
                 QEMUDeviceTreeRegRegion(
@@ -183,7 +185,7 @@ def _irq_resources_from_hints(hints: list[dict[str, Any]]) -> list[QEMUIRQResour
     for hint in hints:
         if hint.get("kind") != "irq_resource":
             continue
-        name = str(hint.get("name", "")).strip()
+        name = _clean_hint_string(hint.get("name"))
         if not name or name in seen:
             continue
         seen.add(name)
@@ -196,6 +198,25 @@ def _irq_resources_from_hints(hints: list[dict[str, Any]]) -> list[QEMUIRQResour
             )
         )
     return resources
+
+
+def _clean_hint_string(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _device_tree_address_cells(mmio_regions: list[QEMUMMIORegion]) -> int:
+    max_address = 0
+    for region in mmio_regions:
+        end_address = region.base_address + max(region.size - 1, 0)
+        max_address = max(max_address, region.base_address, end_address)
+    return 2 if max_address > 0xFFFFFFFF else 1
+
+
+def _device_tree_size_cells(mmio_regions: list[QEMUMMIORegion]) -> int:
+    max_size = max((region.size for region in mmio_regions), default=0)
+    return 2 if max_size > 0xFFFFFFFF else 1
 
 
 def _irq_resources_from_interrupt_model(peripheral: Peripheral) -> list[QEMUIRQResource]:
@@ -212,7 +233,7 @@ def _irq_resources_from_interrupt_model(peripheral: Peripheral) -> list[QEMUIRQR
             QEMUIRQResource(
                 name=name,
                 index=len(resources),
-                irq_number=line.irq_number,
+                irq_number=line.irq_number if line.irq_number >= 0 else None,
             )
         )
     return resources
