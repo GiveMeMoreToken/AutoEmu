@@ -749,6 +749,23 @@ static void foo_reset(struct foo_dev *foo)
         assert by_register["FOO_RESET"].access_type == "write"
         assert by_register["FOO_RESET"].value_expr == "reset_value"
 
+    def test_generic_linux_write_wrapper_preserves_value_expression_template(self):
+        analysis = analyze_driver_string(
+            """\
+#define foo_write(dev, mask) writel((mask) | FOO_ENABLE, (dev)->base + FOO_CTRL)
+
+static void foo_enable(struct foo_dev *foo)
+{
+    foo_write(foo, FOO_MASK);
+}
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_CTRL"].access_type == "write"
+        assert by_register["FOO_CTRL"].value_expr == "FOO_MASK | FOO_ENABLE"
+
     def test_generic_linux_pointer_return_function_on_single_line(self):
         analysis = analyze_driver_string(
             """\
@@ -760,6 +777,18 @@ static const struct foo_desc *foo_get_desc(struct foo_dev *foo) { u32 status = r
         by_register = {a.register: a for a in analysis.register_accesses}
         assert by_register["FOO_DESC"].access_type == "read"
         assert by_register["FOO_DESC"].in_function == "foo_get_desc"
+
+    def test_generic_linux_attached_star_pointer_return_function(self):
+        analysis = analyze_driver_string(
+            """\
+static uint32_t* foo_get_ptr(struct foo_dev *foo) { return (uint32_t *)readl(foo->base + FOO_PTR); }
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_PTR"].access_type == "read"
+        assert by_register["FOO_PTR"].in_function == "foo_get_ptr"
 
     def test_generic_linux_else_if_block_is_not_parsed_as_function(self):
         analysis = analyze_driver_string(

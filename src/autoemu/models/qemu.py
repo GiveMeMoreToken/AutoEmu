@@ -66,8 +66,8 @@ class QEMUDeviceTreeNode(BaseModel):
 
     node_name: str
     unit_address: str
-    address_cells: int = 1
-    size_cells: int = 1
+    address_cells: int = Field(default=1, ge=0)
+    size_cells: int = Field(default=1, ge=0)
     compatible: list[str] = Field(default_factory=list)
     reg: list[QEMUDeviceTreeRegRegion] = Field(default_factory=list)
     interrupt_names: list[str] = Field(default_factory=list)
@@ -189,12 +189,16 @@ def _irq_resources_from_hints(hints: list[dict[str, Any]]) -> list[QEMUIRQResour
         if not name or name in seen:
             continue
         seen.add(name)
-        source = hint.get("source") or hint.get("function")
+        source = (
+            _clean_hint_string(hint.get("source"))
+            or _clean_hint_string(hint.get("function"))
+            or None
+        )
         resources.append(
             QEMUIRQResource(
                 name=name,
                 index=len(resources),
-                source=str(source) if source else None,
+                source=source,
             )
         )
     return resources

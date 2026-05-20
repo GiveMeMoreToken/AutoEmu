@@ -9,6 +9,7 @@ from autoemu.models.interrupt import InterruptLine, InterruptModel
 from autoemu.models.dependency import DependencyEdge, DependencyGraph, DependencyType
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.qemu import (
+    QEMUDeviceTreeNode,
     QEMUDeviceTreeRegRegion,
     QEMUIRQResource,
     QEMUMMIORegion,
@@ -387,6 +388,28 @@ class TestQEMUHardwareModel:
         assert [irq.name for irq in model.irq_resources] == ["fallback"]
         assert model.device_tree.interrupt_names == ["fallback"]
 
+    def test_builder_ignores_blank_irq_hint_source_metadata(self):
+        peripheral = Peripheral(
+            name="SENSOR",
+            base_address=0x50000000,
+            address_size=0x100,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(name="SENSOR", base_address=0x50000000),
+        )
+
+        model = build_qemu_hardware_model(
+            peripheral,
+            {
+                "state_hints": [
+                    {"kind": "irq_resource", "name": "ready", "function": "  "},
+                    {"kind": "irq_resource", "name": "fault", "source": None},
+                ],
+            },
+        )
+
+        assert [irq.name for irq in model.irq_resources] == ["ready", "fault"]
+        assert [irq.source for irq in model.irq_resources] == [None, None]
+
     def test_builder_falls_back_to_interrupt_model_lines_for_irq_resources(self):
         peripheral = Peripheral(
             name="TIMER",
@@ -437,6 +460,8 @@ class TestQEMUHardwareModel:
             (QEMUMMIORegion, {"name": "mmio", "base_address": 0, "size": 1, "register_count": -1}),
             (QEMUDeviceTreeRegRegion, {"name": "mmio", "base_address": -1, "size": 1}),
             (QEMUDeviceTreeRegRegion, {"name": "mmio", "base_address": 0, "size": -1}),
+            (QEMUDeviceTreeNode, {"node_name": "dev", "unit_address": "0", "address_cells": -1}),
+            (QEMUDeviceTreeNode, {"node_name": "dev", "unit_address": "0", "size_cells": -1}),
             (QEMUIRQResource, {"name": "irq", "index": -1, "irq_number": 1}),
             (QEMUIRQResource, {"name": "irq", "index": 0, "irq_number": -1}),
         ],

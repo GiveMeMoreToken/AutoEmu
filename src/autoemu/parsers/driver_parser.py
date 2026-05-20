@@ -130,8 +130,7 @@ _RE_IT_CHECK = re.compile(
 )
 _RE_FUNC_DEF = re.compile(
     r"^[ \t]*(?!(?:else\s+if|if|for|while|switch|return)\b)"
-    r"(?:[A-Za-z_]\w*\s+)+"
-    r"(?:\*+\s*)*"
+    r"[A-Za-z_][A-Za-z0-9_\s\*]*?[\s\*]+"
     r"([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
     r"(?:[A-Za-z_][\w\s\(\),]*\s*)?\{",
     re.MULTILINE,
@@ -348,6 +347,29 @@ def _extract_macro_arg_reference(expr: str, arg_names: Iterable[str]) -> str:
     return ""
 
 
+def _macro_value_expr_template(expr: str, arg_names: Iterable[str]) -> str:
+    stripped = _strip_outer_parens(expr)
+    arg = _extract_macro_arg_reference(stripped, arg_names)
+    if arg and _is_wrapped_macro_arg(stripped, arg):
+        return arg
+    return stripped
+
+
+def _is_wrapped_macro_arg(expr: str, arg_name: str) -> bool:
+    candidate = expr.strip()
+    while True:
+        before = candidate
+        candidate = _strip_outer_parens(candidate)
+        candidate = re.sub(
+            r"^\(\s*(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*\s*(?:\*+\s*)?\)\s*",
+            "",
+            candidate,
+        ).strip()
+        if candidate == before:
+            break
+    return candidate == arg_name
+
+
 def _extract_register_expr_template(address_expr: str) -> str:
     for part in reversed(_split_top_level_plus(address_expr)):
         stripped = _strip_outer_parens(part)
@@ -371,7 +393,16 @@ def _substitute_macro_args(
         identifier = match.group(0)
         return arg_values.get(identifier, identifier)
 
-    return _strip_outer_parens(re.sub(r"\b[A-Za-z_]\w*\b", replace, expr))
+    substituted = _strip_outer_parens(re.sub(r"\b[A-Za-z_]\w*\b", replace, expr))
+    while True:
+        simplified = re.sub(
+            r"(?<![A-Za-z0-9_])\(\s*([A-Za-z_]\w*)\s*\)",
+            r"\1",
+            substituted,
+        )
+        if simplified == substituted:
+            return simplified
+        substituted = simplified
 
 
 def _extract_mmio_wrappers(content: str) -> dict[str, list[_MMIOWrapper]]:
@@ -391,8 +422,7 @@ def _extract_mmio_wrappers(content: str) -> dict[str, list[_MMIOWrapper]]:
             register_expr = _extract_register_expr_template(call_args[1])
             if not register_expr:
                 continue
-            value_arg = _extract_macro_arg_reference(call_args[0], arg_names)
-            value_expr = value_arg or _strip_outer_parens(call_args[0])
+            value_expr = _macro_value_expr_template(call_args[0], arg_names)
             macro_accesses.append((
                 position,
                 _MMIOWrapper(
