@@ -11,6 +11,7 @@ from autoemu.generators.qemu_generator import (
     _generate_qtest,
     _generate_source,
 )
+from autoemu.modeling_utils import normalize_name, snake_case
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.qemu import QEMUHardwareModel, build_qemu_hardware_model
 
@@ -37,10 +38,10 @@ def generate_qemu_tree_artifacts(
     dts_path = _tree_path(output_path, _derive_device_tree_path(model))
 
     source_path.write_text(_tree_source(peripheral, model), encoding="utf-8")
-    header_path.write_text(_generate_header(peripheral), encoding="utf-8")
+    header_path.write_text(_tree_header(peripheral, model), encoding="utf-8")
     meson_path.write_text(_generate_meson_snippet(model), encoding="utf-8")
     kconfig_path.write_text(_generate_kconfig_snippet(model), encoding="utf-8")
-    qtest_path.write_text(_generate_qtest(peripheral), encoding="utf-8")
+    qtest_path.write_text(_tree_qtest(peripheral, model), encoding="utf-8")
     dts_path.write_text(_generate_device_tree_snippet(model), encoding="utf-8")
 
     return [
@@ -63,12 +64,68 @@ def _tree_path(output_dir: Path, tree_relative_path: str) -> Path:
 
 
 def _tree_source(peripheral: Peripheral, model: QEMUHardwareModel) -> str:
-    source = _generate_source(peripheral)
+    source = _rewrite_generated_identity(_generate_source(peripheral), peripheral, model)
     qemu_header = _qemu_include_path(model.file_layout.header_path)
     include_lines = [line for line in source.splitlines() if line.startswith('#include "hw/')]
     if not include_lines:
         return source
     return source.replace(include_lines[0], f'#include "{qemu_header}"', 1)
+
+
+def _tree_header(peripheral: Peripheral, model: QEMUHardwareModel) -> str:
+    return _rewrite_generated_identity(_generate_header(peripheral), peripheral, model)
+
+
+def _tree_qtest(peripheral: Peripheral, model: QEMUHardwareModel) -> str:
+    return _rewrite_generated_identity(_generate_qtest(peripheral), peripheral, model)
+
+
+def _rewrite_generated_identity(
+    content: str,
+    peripheral: Peripheral,
+    model: QEMUHardwareModel,
+) -> str:
+    generated_identity = build_qemu_hardware_model(peripheral).identity
+    replacements = _identity_replacements(generated_identity, model.identity)
+    rewritten = content
+    for old, new in replacements:
+        rewritten = rewritten.replace(old, new)
+    return rewritten
+
+
+def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:
+    old_peripheral_snake = normalize_name(snake_case(old.peripheral_name))
+    new_peripheral_snake = normalize_name(snake_case(new.peripheral_name))
+    old_display_prefix = _display_prefix(old.c_identifier_prefix, old_peripheral_snake)
+    old_qtest_path = f"/{old.qom_type.replace('-', '/')}"
+    new_qtest_path = f"/{new.qom_type.replace('-', '/')}"
+
+    pairs = [
+        (old_qtest_path, new_qtest_path),
+        (
+            f"{old_display_prefix.upper()} {old.peripheral_name}",
+            f"{new.kconfig_symbol} {new.peripheral_name}",
+        ),
+        (old.state_struct_name, new.state_struct_name),
+        (old.type_macro, new.type_macro),
+        (old.kconfig_symbol, new.kconfig_symbol),
+        (old.c_identifier_prefix, new.c_identifier_prefix),
+        (old.qom_type, new.qom_type),
+        (old.peripheral_name, new.peripheral_name),
+        (old_peripheral_snake, new_peripheral_snake),
+    ]
+    return sorted(
+        [(old_value, new_value) for old_value, new_value in pairs if old_value != new_value],
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+
+
+def _display_prefix(c_identifier_prefix: str, peripheral_snake: str) -> str:
+    suffix = f"_{peripheral_snake}"
+    if c_identifier_prefix.endswith(suffix):
+        return c_identifier_prefix[: -len(suffix)]
+    return c_identifier_prefix
 
 
 def _qemu_include_path(header_path: str) -> str:
@@ -113,10 +170,10 @@ def _generate_device_tree_snippet(model: QEMUHardwareModel) -> str:
     unit_address = dt.unit_address
     lines = [
         "/ {",
+        f"    #address-cells = <{dt.address_cells}>;",
+        f"    #size-cells = <{dt.size_cells}>;",
         f"    {node_name}@{unit_address} {{",
         f"        compatible = {_format_string_list(dt.compatible)};",
-        f"        #address-cells = <{dt.address_cells}>;",
-        f"        #size-cells = <{dt.size_cells}>;",
     ]
 
     if dt.reg:

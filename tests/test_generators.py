@@ -17,6 +17,32 @@ from autoemu.generators.test_generator import generate_test_harness
 from autoemu.models.qemu import build_qemu_hardware_model
 
 
+def _make_custom_hardware_model(periph: Peripheral):
+    hardware_model = build_qemu_hardware_model(periph)
+    hardware_model.identity = hardware_model.identity.model_copy(
+        update={
+            "peripheral_name": "ACCELERATOR",
+            "qom_type": "vendor-accelerator",
+            "c_identifier_prefix": "vendor_accel",
+            "type_macro": "TYPE_VENDOR_ACCEL",
+            "state_struct_name": "VendorAccelState",
+            "kconfig_symbol": "VENDOR_ACCEL",
+        }
+    )
+    hardware_model.file_layout = hardware_model.file_layout.model_copy(
+        update={
+            "source_path": "hw/dma/vendor_accel.c",
+            "header_path": "include/hw/dma/vendor_accel.h",
+            "meson_path": "hw/dma/meson.build",
+            "meson_snippet_path": "hw/dma/vendor_accel.meson.inc",
+            "qtest_path": "tests/qtest/vendor_accel-test.c",
+        }
+    )
+    hardware_model.device_tree.node_name = "accelerator"
+    hardware_model.device_tree.compatible = ["vendor,accelerator"]
+    return hardware_model
+
+
 def _make_test_peripheral() -> Peripheral:
     return Peripheral(
         name="TEST_PERIPH",
@@ -265,6 +291,22 @@ class TestQEMUTreeGenerator:
             assert "clock-frequency = <12000000>;" in dts
             assert 'status = "okay";' in dts
 
+    def test_device_tree_cell_metadata_is_emitted_on_parent_node(self):
+        periph = _make_test_peripheral()
+        hardware_model = build_qemu_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            dts_path = next(Path(path) for path in files if Path(path).suffix == ".dtsi")
+            dts = dts_path.read_text(encoding="utf-8")
+            child_node = dts[dts.index("test_periph@40000000"):]
+
+            assert "\n    #address-cells = <1>;" in dts
+            assert "\n    #size-cells = <1>;" in dts
+            assert "\n        #address-cells" not in child_node
+            assert "\n        #size-cells" not in child_node
+
     def test_device_tree_snippet_uses_64_bit_reg_cells_for_high_addresses(self):
         periph = _make_test_peripheral()
         periph.base_address = 0x1_0000_1000
@@ -280,6 +322,41 @@ class TestQEMUTreeGenerator:
             assert "#address-cells = <2>;" in dts
             assert "#size-cells = <1>;" in dts
             assert "reg = <0x00000001 0x00001000 0x00000200>;" in dts
+
+    def test_tree_source_and_header_use_schema_identity_when_it_differs_from_peripheral(self):
+        periph = _make_test_peripheral()
+        hardware_model = _make_custom_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            source = (Path(tmpdir) / hardware_model.file_layout.source_path).read_text(encoding="utf-8")
+            header = (Path(tmpdir) / hardware_model.file_layout.header_path).read_text(encoding="utf-8")
+
+            assert '#include "hw/dma/vendor_accel.h"' in source
+            assert "vendor_accel_read" in source
+            assert "VendorAccelState" in source
+            assert "TYPE_VENDOR_ACCEL" in source
+            assert '"vendor-accelerator"' in header
+            assert "OBJECT_DECLARE_SIMPLE_TYPE(VendorAccelState, VENDOR_ACCEL)" in header
+            assert "TYPE_STM32F4_TEST_PERIPH" not in source
+            assert "STM32F4TEST_PERIPHState" not in header
+
+    def test_tree_qtest_uses_schema_identity_when_it_differs_from_peripheral(self):
+        periph = _make_test_peripheral()
+        hardware_model = _make_custom_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            qtest = (Path(tmpdir) / hardware_model.file_layout.qtest_path).read_text(encoding="utf-8")
+
+            assert "QTest for VENDOR_ACCEL ACCELERATOR peripheral model" in qtest
+            assert "#define ACCELERATOR_BASE  0x40000000ULL" in qtest
+            assert "test_accelerator_reset" in qtest
+            assert '"/vendor/accelerator/reset"' in qtest
+            assert "TEST_PERIPH_BASE" not in qtest
+            assert '"/stm32f4/test_periph/reset"' not in qtest
 
 
 class TestTestGenerator:
