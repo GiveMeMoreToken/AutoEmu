@@ -62,6 +62,7 @@ def validate_qemu_hardware_model(
                 path=source,
             )
         )
+    issues.extend(_validate_file_layout_paths(model, source))
 
     if not model.mmio_regions:
         issues.append(
@@ -344,6 +345,30 @@ def error_messages(issues: list[Issue]) -> list[str]:
 def warning_messages(issues: list[Issue]) -> list[str]:
     """Extract warning messages from issue dictionaries."""
     return [issue["message"] for issue in issues if issue.get("severity") == "warning"]
+
+
+def _validate_file_layout_paths(model: QEMUHardwareModel, source: str) -> list[Issue]:
+    issues: list[Issue] = []
+    for field_name in (
+        "source_path",
+        "header_path",
+        "meson_path",
+        "meson_snippet_path",
+        "qtest_path",
+    ):
+        value = getattr(model.file_layout, field_name, "")
+        if not str(value).strip():
+            continue
+        if not _is_safe_relative_path(value):
+            issues.append(
+                _issue(
+                    "error",
+                    f"{source} file_layout.{field_name} must be a relative path without '..': {value}",
+                    code="unsafe_file_layout_path",
+                    path=source,
+                )
+            )
+    return issues
 
 
 def _is_safe_relative_path(path: str | Path) -> bool:

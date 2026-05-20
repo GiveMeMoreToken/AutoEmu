@@ -437,6 +437,42 @@ def test_do_validate_requires_a_usable_meson_artifact(monkeypatch, tmp_path):
     )
 
 
+def test_do_validate_fails_on_parent_declared_artifact_paths(monkeypatch, tmp_path):
+    hardware = _valid_qemu_hardware_json()
+    hardware["file_layout"]["source_path"] = "../escape.c"
+    hardware["file_layout"]["meson_snippet_path"] = "../escape.meson.inc"
+    (tmp_path / "demo_qemu_hardware.json").write_text(json.dumps(hardware), encoding="utf-8")
+    (tmp_path / "other.c").write_text("int unrelated(void) { return 0; }\n", encoding="utf-8")
+    (tmp_path / "other.h").write_text("#pragma once\n", encoding="utf-8")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    messages = _validation_error_messages(result)
+    assert result["success"] is False
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any("../escape.c" in message and "relative" in message.lower() for message in messages)
+    assert any("../escape.meson.inc" in message and "relative" in message.lower() for message in messages)
+
+
+def test_do_validate_fails_on_absolute_declared_artifact_paths(monkeypatch, tmp_path):
+    hardware = _valid_qemu_hardware_json()
+    hardware["file_layout"]["header_path"] = "/tmp/escape.h"
+    hardware["file_layout"]["qtest_path"] = "/tmp/escape-test.c"
+    (tmp_path / "demo_qemu_hardware.json").write_text(json.dumps(hardware), encoding="utf-8")
+    (tmp_path / "other.c").write_text("int unrelated(void) { return 0; }\n", encoding="utf-8")
+    (tmp_path / "other.h").write_text("#pragma once\n", encoding="utf-8")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    messages = _validation_error_messages(result)
+    assert result["success"] is False
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any("/tmp/escape.h" in message and "relative" in message.lower() for message in messages)
+    assert any("/tmp/escape-test.c" in message and "relative" in message.lower() for message in messages)
+
+
 def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):
     _write_nested_c_h_files(tmp_path)
     monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
