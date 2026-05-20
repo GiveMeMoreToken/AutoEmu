@@ -316,19 +316,32 @@ def _write_nested_c_h_files(base: Path) -> None:
     header.write_text("#pragma once\nint demo_device_init(void);\n", encoding="utf-8")
 
 
+def _write_declared_qemu_tree_files(base: Path, *, source_text: str = "int demo(void) { return 0; }\n") -> None:
+    files = {
+        "hw/misc/demo_device.c": source_text,
+        "include/hw/misc/demo_device.h": "#pragma once\nint demo(void);\n",
+        "hw/misc/demo_device.meson.inc": "system_ss.add(when: 'CONFIG_DEMO', if_true: files('demo_device.c'))\n",
+        "tests/qtest/demo_device-test.c": "int main(void) { return 0; }\n",
+    }
+    for rel_path, content in files.items():
+        path = base / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
 def _validation_error_messages(result: dict) -> list[str]:
     return [error.get("stderr", "") for error in result["errors"]]
 
 
 def test_do_validate_recurses_generated_sources_when_qemu_tree_missing(monkeypatch, tmp_path):
     _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
-    _write_nested_c_h_files(tmp_path)
+    _write_declared_qemu_tree_files(tmp_path)
     monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
 
     result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
 
     assert result["success"] is True
-    assert result["generated_source_files"] == 2
+    assert result["generated_source_files"] == 3
     assert result["files_checked"] == 0
     assert any("skipping compilation check" in warning.lower() for warning in result["warnings"])
     assert not any("no c/h files" in warning.lower() for warning in result["warnings"])
@@ -349,6 +362,39 @@ def test_do_validate_fails_when_no_generated_sources(monkeypatch, tmp_path):
         for message in _validation_error_messages(result)
     )
     assert result["structural_error_messages"] == _validation_error_messages(result)
+
+
+def test_do_validate_fails_when_declared_hardware_artifacts_are_missing(monkeypatch, tmp_path):
+    _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
+    (tmp_path / "other.c").write_text("int unrelated(void) { return 0; }\n", encoding="utf-8")
+    (tmp_path / "other.h").write_text("#pragma once\n", encoding="utf-8")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    messages = _validation_error_messages(result)
+    assert result["success"] is False
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any("hw/misc/demo_device.c" in message for message in messages)
+    assert any("include/hw/misc/demo_device.h" in message for message in messages)
+    assert any("hw/misc/demo_device.meson.inc" in message for message in messages)
+    assert any("tests/qtest/demo_device-test.c" in message for message in messages)
+    assert not any("hw/misc/meson.build" in message for message in messages)
+
+
+def test_do_validate_fails_when_declared_artifact_is_whitespace_only(monkeypatch, tmp_path):
+    _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
+    _write_declared_qemu_tree_files(tmp_path, source_text=" \n\t\n")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any(
+        "hw/misc/demo_device.c" in message and "empty" in message.lower()
+        for message in _validation_error_messages(result)
+    )
 
 
 def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):

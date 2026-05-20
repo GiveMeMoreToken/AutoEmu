@@ -174,6 +174,35 @@ def validate_qemu_hardware_json(path: str | Path) -> list[Issue]:
     return validate_qemu_hardware_model(data, source=str(hardware_path))
 
 
+def declared_qemu_tree_artifact_paths(
+    hardware_model: QEMUHardwareModel | dict[str, Any],
+    root: str | Path,
+) -> list[Path]:
+    """Return output paths declared by a QEMU hardware file layout."""
+    try:
+        model = (
+            hardware_model
+            if isinstance(hardware_model, QEMUHardwareModel)
+            else QEMUHardwareModel.model_validate(hardware_model)
+        )
+    except ValidationError:
+        return []
+
+    root_path = Path(root)
+    layout = model.file_layout
+    paths = [
+        layout.source_path,
+        layout.header_path,
+        layout.meson_snippet_path or layout.meson_path,
+        layout.qtest_path,
+    ]
+    return [
+        root_path / path
+        for path in paths
+        if _is_safe_relative_path(path)
+    ]
+
+
 def validate_generated_artifact_files(paths: list[str | Path]) -> list[Issue]:
     """Validate that generated artifact paths exist as non-empty files."""
     issues: list[Issue] = []
@@ -204,7 +233,7 @@ def validate_generated_artifact_files(paths: list[str | Path]) -> list[Issue]:
             )
             continue
         try:
-            if path.stat().st_size == 0:
+            if path.stat().st_size == 0 or _is_whitespace_only_text(path):
                 issues.append(
                     _issue(
                         "error",
@@ -264,6 +293,15 @@ def validate_output_directory_artifacts(output_dir: str | Path) -> dict[str, Any
             )
         for hardware_file in qemu_hardware_files:
             hardware_issues.extend(validate_qemu_hardware_json(hardware_file))
+            try:
+                data = json.loads(hardware_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            artifact_issues.extend(
+                validate_generated_artifact_files(
+                    declared_qemu_tree_artifact_paths(data, root)
+                )
+            )
 
         source_files = sorted(
             path
@@ -299,6 +337,19 @@ def error_messages(issues: list[Issue]) -> list[str]:
 def warning_messages(issues: list[Issue]) -> list[str]:
     """Extract warning messages from issue dictionaries."""
     return [issue["message"] for issue in issues if issue.get("severity") == "warning"]
+
+
+def _is_safe_relative_path(path: str | Path) -> bool:
+    candidate = Path(path)
+    return bool(str(path).strip()) and not candidate.is_absolute() and ".." not in candidate.parts
+
+
+def _is_whitespace_only_text(path: Path) -> bool:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return False
+    return not content.strip()
 
 
 def _issue(severity: str, message: str, *, code: str, path: str | None = None) -> Issue:
