@@ -11,7 +11,7 @@ from autoemu.generators.qemu_generator import (
     _generate_qtest,
     _generate_source,
 )
-from autoemu.modeling_utils import normalize_name, snake_case
+from autoemu.modeling_utils import normalize_name, snake_case, upper_case
 from autoemu.models.peripheral import Peripheral
 from autoemu.models.qemu import QEMUHardwareModel, build_qemu_hardware_model
 
@@ -96,6 +96,8 @@ def _rewrite_generated_identity(
 def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:
     old_peripheral_snake = normalize_name(snake_case(old.peripheral_name))
     new_peripheral_snake = normalize_name(snake_case(new.peripheral_name))
+    old_peripheral_upper = upper_case(old.peripheral_name)
+    new_peripheral_upper = upper_case(new.peripheral_name)
     old_display_prefix = _display_prefix(old.c_identifier_prefix, old_peripheral_snake)
     old_qtest_path = f"/{old.qom_type.replace('-', '/')}"
     new_qtest_path = f"/{new.qom_type.replace('-', '/')}"
@@ -111,6 +113,7 @@ def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:
         (old.kconfig_symbol, new.kconfig_symbol),
         (old.c_identifier_prefix, new.c_identifier_prefix),
         (old.qom_type, new.qom_type),
+        (old_peripheral_upper, new_peripheral_upper),
         (old.peripheral_name, new.peripheral_name),
         (old_peripheral_snake, new_peripheral_snake),
     ]

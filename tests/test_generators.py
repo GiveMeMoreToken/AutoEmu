@@ -104,6 +104,13 @@ def _make_test_peripheral() -> Peripheral:
     )
 
 
+def _make_mixed_case_test_peripheral() -> Peripheral:
+    periph = _make_test_peripheral()
+    periph.name = "TestPeriph"
+    periph.register_block.name = "TestPeriph"
+    return periph
+
+
 class TestQEMUGenerator:
     def test_target_version(self):
         assert QEMU_TARGET_VERSION == "v9.2.4"
@@ -324,7 +331,7 @@ class TestQEMUTreeGenerator:
             assert "reg = <0x00000001 0x00001000 0x00000200>;" in dts
 
     def test_tree_source_and_header_use_schema_identity_when_it_differs_from_peripheral(self):
-        periph = _make_test_peripheral()
+        periph = _make_mixed_case_test_peripheral()
         hardware_model = _make_custom_hardware_model(periph)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -337,13 +344,15 @@ class TestQEMUTreeGenerator:
             assert "vendor_accel_read" in source
             assert "VendorAccelState" in source
             assert "TYPE_VENDOR_ACCEL" in source
+            assert "ACCELERATOR_CR_OFFSET" in header
             assert '"vendor-accelerator"' in header
             assert "OBJECT_DECLARE_SIMPLE_TYPE(VendorAccelState, VENDOR_ACCEL)" in header
+            assert "TEST_PERIPH_CR_OFFSET" not in header
             assert "TYPE_STM32F4_TEST_PERIPH" not in source
             assert "STM32F4TEST_PERIPHState" not in header
 
     def test_tree_qtest_uses_schema_identity_when_it_differs_from_peripheral(self):
-        periph = _make_test_peripheral()
+        periph = _make_mixed_case_test_peripheral()
         hardware_model = _make_custom_hardware_model(periph)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -353,9 +362,11 @@ class TestQEMUTreeGenerator:
 
             assert "QTest for VENDOR_ACCEL ACCELERATOR peripheral model" in qtest
             assert "#define ACCELERATOR_BASE  0x40000000ULL" in qtest
+            assert "ACCELERATOR_REG(offset)" in qtest
             assert "test_accelerator_reset" in qtest
             assert '"/vendor/accelerator/reset"' in qtest
             assert "TEST_PERIPH_BASE" not in qtest
+            assert "TEST_PERIPH_REG(offset)" not in qtest
             assert '"/stm32f4/test_periph/reset"' not in qtest
 
 
