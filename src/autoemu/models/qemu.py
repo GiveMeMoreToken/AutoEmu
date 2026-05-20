@@ -30,8 +30,8 @@ class QEMUFileLayout(BaseModel):
 
     source_path: str
     header_path: str
-    meson_path: str
-    meson_snippet_path: str
+    meson_path: str = ""
+    meson_snippet_path: str = ""
     qtest_path: str
 
 

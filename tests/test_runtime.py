@@ -397,6 +397,46 @@ def test_do_validate_fails_when_declared_artifact_is_whitespace_only(monkeypatch
     )
 
 
+def test_do_validate_accepts_meson_path_when_snippet_path_is_missing(monkeypatch, tmp_path):
+    hardware = _valid_qemu_hardware_json()
+    del hardware["file_layout"]["meson_snippet_path"]
+    (tmp_path / "demo_qemu_hardware.json").write_text(json.dumps(hardware), encoding="utf-8")
+    files = {
+        "hw/misc/demo_device.c": "int demo(void) { return 0; }\n",
+        "include/hw/misc/demo_device.h": "#pragma once\nint demo(void);\n",
+        "hw/misc/meson.build": "system_ss.add(when: 'CONFIG_DEMO', if_true: files('demo_device.c'))\n",
+        "tests/qtest/demo_device-test.c": "int main(void) { return 0; }\n",
+    }
+    for rel_path, content in files.items():
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is True
+    assert result["errors"] == []
+    assert any("skipping compilation check" in warning.lower() for warning in result["warnings"])
+
+
+def test_do_validate_requires_a_usable_meson_artifact(monkeypatch, tmp_path):
+    hardware = _valid_qemu_hardware_json()
+    hardware["file_layout"]["meson_path"] = ""
+    hardware["file_layout"]["meson_snippet_path"] = ""
+    (tmp_path / "demo_qemu_hardware.json").write_text(json.dumps(hardware), encoding="utf-8")
+    _write_declared_qemu_tree_files(tmp_path)
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    assert result["success"] is False
+    assert any(
+        "meson_snippet_path or meson_path" in message
+        for message in _validation_error_messages(result)
+    )
+
+
 def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):
     _write_nested_c_h_files(tmp_path)
     monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])

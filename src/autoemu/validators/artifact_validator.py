@@ -41,8 +41,6 @@ def validate_qemu_hardware_model(
     for field_name in (
         "source_path",
         "header_path",
-        "meson_path",
-        "meson_snippet_path",
         "qtest_path",
     ):
         value = getattr(model.file_layout, field_name, "")
@@ -55,6 +53,15 @@ def validate_qemu_hardware_model(
                     path=source,
                 )
             )
+    if not (model.file_layout.meson_snippet_path.strip() or model.file_layout.meson_path.strip()):
+        issues.append(
+            _issue(
+                "error",
+                f"{source} file_layout requires meson_snippet_path or meson_path",
+                code="missing_file_layout_path",
+                path=source,
+            )
+        )
 
     if not model.mmio_regions:
         issues.append(
