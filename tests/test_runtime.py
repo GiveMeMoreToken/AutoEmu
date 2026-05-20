@@ -316,6 +316,10 @@ def _write_nested_c_h_files(base: Path) -> None:
     header.write_text("#pragma once\nint demo_device_init(void);\n", encoding="utf-8")
 
 
+def _validation_error_messages(result: dict) -> list[str]:
+    return [error.get("stderr", "") for error in result["errors"]]
+
+
 def test_do_validate_recurses_generated_sources_when_qemu_tree_missing(monkeypatch, tmp_path):
     _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
     _write_nested_c_h_files(tmp_path)
@@ -338,7 +342,13 @@ def test_do_validate_fails_when_no_generated_sources(monkeypatch, tmp_path):
 
     assert result["success"] is False
     assert result["generated_source_files"] == 0
-    assert any("no generated c/h files" in error.lower() for error in result["errors"])
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert all("file" in error and "stderr" in error for error in result["errors"])
+    assert any(
+        "no generated c/h files" in message.lower()
+        for message in _validation_error_messages(result)
+    )
+    assert result["structural_error_messages"] == _validation_error_messages(result)
 
 
 def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):
@@ -348,7 +358,11 @@ def test_do_validate_fails_on_missing_qemu_hardware_json(monkeypatch, tmp_path):
     result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
 
     assert result["success"] is False
-    assert any("qemu hardware" in error.lower() for error in result["errors"])
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any(
+        "qemu hardware" in message.lower()
+        for message in _validation_error_messages(result)
+    )
     assert any("skipping compilation check" in warning.lower() for warning in result["warnings"])
 
 
@@ -360,8 +374,12 @@ def test_do_validate_fails_on_empty_qemu_hardware_json_when_compile_skipped(monk
     result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
 
     assert result["success"] is False
-    assert any("empty" in error.lower() for error in result["errors"])
-    assert any("qemu hardware" in error.lower() for error in result["errors"])
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any("empty" in message.lower() for message in _validation_error_messages(result))
+    assert any(
+        "qemu hardware" in message.lower()
+        for message in _validation_error_messages(result)
+    )
 
 
 def test_do_validate_fails_on_incomplete_qemu_hardware_json(monkeypatch, tmp_path):
@@ -375,4 +393,8 @@ def test_do_validate_fails_on_incomplete_qemu_hardware_json(monkeypatch, tmp_pat
     result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
 
     assert result["success"] is False
-    assert any("incomplete or invalid" in error.lower() for error in result["errors"])
+    assert all(isinstance(error, dict) for error in result["errors"])
+    assert any(
+        "incomplete or invalid" in message.lower()
+        for message in _validation_error_messages(result)
+    )

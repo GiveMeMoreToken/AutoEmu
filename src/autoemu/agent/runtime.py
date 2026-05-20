@@ -577,12 +577,13 @@ class AutoEmuAgentRuntime:
         artifact_issues = structural["artifact_issues"]
         hardware_issues = structural["hardware_issues"]
         structural_issues = artifact_issues + hardware_issues
-        structural_errors = error_messages(structural_issues)
+        structural_error_messages = error_messages(structural_issues)
+        structural_errors = _compile_compatible_issue_errors(structural_issues)
         structural_warnings = warning_messages(structural_issues)
         files = [Path(path) for path in structural["source_files"]]
 
-        for err in structural_errors:
-            _log(f"  FAIL: {err}", "fail")
+        for message in structural_error_messages:
+            _log(f"  FAIL: {message}", "fail")
         for warning in structural_warnings:
             _log(f"  WARN: {warning}", "warn")
 
@@ -590,6 +591,7 @@ class AutoEmuAgentRuntime:
             "success": not structural_errors,
             "files_checked": 0,
             "errors": structural_errors,
+            "structural_error_messages": structural_error_messages,
             "warnings": structural_warnings,
             "artifact_issues": artifact_issues,
             "hardware_issues": hardware_issues,
@@ -637,6 +639,7 @@ class AutoEmuAgentRuntime:
         )
         compile_result["warnings"] = all_warnings
         compile_result["errors"] = structural_errors + compile_result.get("errors", [])
+        compile_result["structural_error_messages"] = structural_error_messages
         compile_result["artifact_issues"] = artifact_issues
         compile_result["hardware_issues"] = hardware_issues
         compile_result["generated_source_files"] = len(files)
@@ -672,6 +675,23 @@ def _sanitize_agent_error(msg: str) -> str:
     if len(msg) > 200:
         return msg[:197] + "..."
     return msg
+
+
+def _compile_compatible_issue_errors(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert structural validation issues into compile-validator error shape."""
+    errors: list[dict[str, Any]] = []
+    for issue in issues:
+        if issue.get("severity") != "error":
+            continue
+        errors.append(
+            {
+                "file": issue.get("path", ""),
+                "returncode": 1,
+                "stderr": issue.get("message", ""),
+                "code": issue.get("code", "structural_validation_error"),
+            }
+        )
+    return errors
 
 
 def _emit_agent_event(
