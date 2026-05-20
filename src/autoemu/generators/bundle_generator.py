@@ -268,6 +268,9 @@ def generate_model_bundle(
     if artifact_issues:
         validation_report["success"] = False
     validation_report["compile_validation"] = compile_result
+    if not compile_result.get("success", False):
+        validation_report["issue_count"] += len(compile_result.get("errors", [])) or 1
+        validation_report["success"] = False
     validation_path = output_path / f"{snake}_validation.json"
     validation_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")
     generated_files.append(str(validation_path))

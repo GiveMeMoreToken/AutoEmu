@@ -182,6 +182,33 @@ def test_generate_model_bundle_reports_empty_tree_artifacts(monkeypatch, tmp_pat
     )
 
 
+def test_generate_model_bundle_fails_validation_when_compile_fails(monkeypatch, tmp_path):
+    compile_result = {
+        "success": False,
+        "files_checked": 1,
+        "errors": [
+            {
+                "file": "hw/misc/stm32f4_usart1.c",
+                "returncode": 1,
+                "stderr": "syntax error",
+            }
+        ],
+        "warnings": ["one warning"],
+    }
+
+    monkeypatch.setattr(
+        "autoemu.generators.bundle_generator.validate_compile",
+        lambda source_files: compile_result,
+    )
+
+    result = generate_model_bundle("USART1", _make_registers(), output_dir=tmp_path)
+
+    report = result["validation_report"]
+    assert report["success"] is False
+    assert report["issue_count"] == len(compile_result["errors"])
+    assert report["compile_validation"] == compile_result
+
+
 def test_verify_peripheral_consistency_ignores_descriptor_pseudo_registers():
     peripheral = build_peripheral_from_models(
         "ETH",
