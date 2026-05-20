@@ -397,6 +397,39 @@ class TestQEMUTreeGenerator:
             assert "TEST_PERIPH2_REG(offset)" in qtest
             assert "TEST_PERIPH22_REG(offset)" not in qtest
 
+    def test_tree_identity_rewrite_does_not_change_qtest_api_symbols(self):
+        periph = _make_test_peripheral()
+        periph.name = "Test"
+        periph.register_block.name = "Test"
+        hardware_model = build_qemu_hardware_model(periph)
+        hardware_model.identity = hardware_model.identity.model_copy(
+            update={
+                "peripheral_name": "Timer",
+                "qom_type": "stm32f4-timer",
+                "c_identifier_prefix": "stm32f4_timer",
+                "type_macro": "TYPE_STM32F4_TIMER",
+                "state_struct_name": "STM32F4TIMERState",
+                "kconfig_symbol": "STM32F4_TIMER",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            qtest = (Path(tmpdir) / hardware_model.file_layout.qtest_path).read_text(encoding="utf-8")
+
+            assert '#include "libqtest.h"' in qtest
+            assert "qtest_init" in qtest
+            assert "qtest_readl" in qtest
+            assert "g_test_init" in qtest
+            assert "g_test_run" in qtest
+            assert "test_timer_reset" in qtest
+            assert '"/stm32f4/timer/reset"' in qtest
+            assert "TIMER_REG(offset)" in qtest
+            assert "libqtimer" not in qtest
+            assert "qtimer_init" not in qtest
+            assert "g_timer_init" not in qtest
+
 
 class TestTestGenerator:
     def test_generates_test_file(self):

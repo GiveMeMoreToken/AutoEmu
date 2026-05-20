@@ -90,11 +90,21 @@ def _rewrite_generated_identity(
     replacements = _identity_replacements(generated_identity, model.identity)
     if not replacements:
         return content
-    replacement_map: dict[str, str] = {}
-    for old_value, new_value in replacements:
-        replacement_map.setdefault(old_value, new_value)
-    pattern = re.compile("|".join(re.escape(old_value) for old_value, _ in replacements))
-    return pattern.sub(lambda match: replacement_map[match.group(0)], content)
+    grouped_patterns: list[str] = []
+    replacement_by_group: dict[str, str] = {}
+    for index, (pattern, replacement) in enumerate(replacements):
+        group_name = f"r{index}"
+        grouped_patterns.append(f"(?P<{group_name}>{pattern})")
+        replacement_by_group[group_name] = replacement
+    combined = re.compile("|".join(grouped_patterns))
+
+    def replace_match(match: re.Match[str]) -> str:
+        for group_name, replacement in replacement_by_group.items():
+            if match.group(group_name) is not None:
+                return replacement
+        return match.group(0)
+
+    return combined.sub(replace_match, content)
 
 
 def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:
@@ -106,26 +116,44 @@ def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:
     old_qtest_path = f"/{old.qom_type.replace('-', '/')}"
     new_qtest_path = f"/{new.qom_type.replace('-', '/')}"
 
-    pairs = [
-        (old_qtest_path, new_qtest_path),
+    exact_qtest_function = f"test_{old_peripheral_snake}_"
+    new_qtest_function = f"test_{new_peripheral_snake}_"
+    candidates = [
+        (old_qtest_path, _literal_pattern(old_qtest_path), new_qtest_path),
         (
             f"{old_display_prefix.upper()} {old.peripheral_name}",
+            _literal_pattern(f"{old_display_prefix.upper()} {old.peripheral_name}"),
             f"{new.kconfig_symbol} {new.peripheral_name}",
         ),
-        (old.state_struct_name, new.state_struct_name),
-        (old.type_macro, new.type_macro),
-        (old.kconfig_symbol, new.kconfig_symbol),
-        (old.c_identifier_prefix, new.c_identifier_prefix),
-        (old.qom_type, new.qom_type),
-        (old_peripheral_upper, new_peripheral_upper),
-        (old.peripheral_name, new.peripheral_name),
-        (old_peripheral_snake, new_peripheral_snake),
+        (old.state_struct_name, _identifier_fragment_pattern(old.state_struct_name), new.state_struct_name),
+        (old.type_macro, _identifier_fragment_pattern(old.type_macro), new.type_macro),
+        (old.kconfig_symbol, _identifier_fragment_pattern(old.kconfig_symbol), new.kconfig_symbol),
+        (old.c_identifier_prefix, _identifier_fragment_pattern(old.c_identifier_prefix), new.c_identifier_prefix),
+        (old.qom_type, _literal_pattern(old.qom_type), new.qom_type),
+        (old_peripheral_upper, _macro_prefix_pattern(old_peripheral_upper), new_peripheral_upper),
+        (exact_qtest_function, _literal_pattern(exact_qtest_function), new_qtest_function),
     ]
     return sorted(
-        [(old_value, new_value) for old_value, new_value in pairs if old_value != new_value],
+        [
+            (pattern, new_value)
+            for old_value, pattern, new_value in candidates
+            if old_value != new_value
+        ],
         key=lambda pair: len(pair[0]),
         reverse=True,
     )
+
+
+def _literal_pattern(value: str) -> str:
+    return re.escape(value)
+
+
+def _identifier_fragment_pattern(value: str) -> str:
+    return rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
+
+
+def _macro_prefix_pattern(value: str) -> str:
+    return rf"(?<![A-Za-z0-9_]){re.escape(value)}(?=_)"
 
 
 def _display_prefix(c_identifier_prefix: str, peripheral_snake: str) -> str:
