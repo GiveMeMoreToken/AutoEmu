@@ -10,6 +10,16 @@ from autoemu.models.peripheral import Peripheral, PeripheralType
 from autoemu.models.state_machine import State, Transition, StateMachine
 from autoemu.models.interrupt import InterruptLine, InterruptModel, FlagBehavior
 from autoemu.models.dependency import DependencyEdge, DependencyGraph, DependencyType
+from autoemu.models.qemu import (
+    QEMUDeviceIdentity,
+    QEMUDeviceTreeNode,
+    QEMUDeviceTreeRegRegion,
+    QEMUFileLayout,
+    QEMUHardwareModel,
+    QEMUIRQResource,
+    QEMUMMIORegion,
+    build_qemu_hardware_model,
+)
 
 __all__ = [
     "AccessType",
@@ -27,4 +37,12 @@ __all__ = [
     "DependencyEdge",
     "DependencyGraph",
     "DependencyType",
+    "QEMUDeviceIdentity",
+    "QEMUDeviceTreeNode",
+    "QEMUDeviceTreeRegRegion",
+    "QEMUFileLayout",
+    "QEMUHardwareModel",
+    "QEMUIRQResource",
+    "QEMUMMIORegion",
+    "build_qemu_hardware_model",
 ]

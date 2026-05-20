@@ -2,9 +2,10 @@
 
 from autoemu.models.register import AccessType, BitField, Register, RegisterBlock
 from autoemu.models.state_machine import State, Transition, StateMachine
-from autoemu.models.interrupt import InterruptModel
+from autoemu.models.interrupt import InterruptLine, InterruptModel
 from autoemu.models.dependency import DependencyEdge, DependencyGraph, DependencyType
 from autoemu.models.peripheral import Peripheral
+from autoemu.models.qemu import build_qemu_hardware_model
 
 
 class TestBitField:
@@ -214,3 +215,102 @@ class TestPeripheral:
         periph.write_register(0x00, 0xFF)
         periph.reset()
         assert periph.read_register(0x00) == 0x42
+
+
+class TestQEMUHardwareModel:
+    def test_builder_derives_generic_identity_paths_and_mmio_region(self):
+        peripheral = Peripheral(
+            name="ACCEL",
+            base_address=0x40010000,
+            address_size=0,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(
+                name="ACCEL",
+                base_address=0x40010000,
+                registers=[
+                    Register(name="CTRL", offset=0x00),
+                    Register(name="STATUS", offset=0x0C),
+                ],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert model.identity.peripheral_name == "ACCEL"
+        assert model.identity.qom_type == "demosoc-accel"
+        assert model.identity.c_identifier_prefix == "demosoc_accel"
+        assert model.identity.type_macro == "TYPE_DEMOSOC_ACCEL"
+        assert model.identity.state_struct_name == "DEMOSOCACCELState"
+        assert model.identity.kconfig_symbol == "DEMOSOC_ACCEL"
+        assert model.file_layout.source_path == "hw/misc/demosoc_accel.c"
+        assert model.file_layout.header_path == "include/hw/misc/demosoc_accel.h"
+        assert model.file_layout.meson_path == "hw/misc/meson.build"
+        assert model.file_layout.qtest_path == "tests/qtest/demosoc_accel-test.c"
+        assert model.mmio_regions[0].name == "mmio"
+        assert model.mmio_regions[0].base_address == 0x40010000
+        assert model.mmio_regions[0].size == 0x10
+        assert model.mmio_regions[0].register_count == 2
+        assert model.device_tree.node_name == "accel"
+        assert model.device_tree.unit_address == "40010000"
+        assert model.device_tree.address_cells == 1
+        assert model.device_tree.size_cells == 1
+        assert model.device_tree.reg[0].base_address == 0x40010000
+        assert model.device_tree.reg[0].size == 0x10
+        assert model.device_tree.compatible == ["demosoc,accel"]
+
+    def test_builder_uses_deduped_driver_compatible_and_irq_hints(self):
+        peripheral = Peripheral(
+            name="SENSOR",
+            base_address=0x50000000,
+            address_size=0x100,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(name="SENSOR", base_address=0x50000000),
+        )
+
+        model = build_qemu_hardware_model(
+            peripheral,
+            {
+                "state_hints": [
+                    {"kind": "compatible", "value": "vendor,demo-sensor"},
+                    {"kind": "compatible", "value": "vendor,demo-sensor"},
+                    {"kind": "compatible", "value": "vendor,demo-sensor-v2"},
+                    {"kind": "irq_resource", "name": "done", "function": "probe"},
+                    {"kind": "irq_resource", "name": "done"},
+                    {"kind": "irq_resource", "name": "error", "source": "platform"},
+                ],
+            },
+        )
+
+        assert model.device_tree.compatible == [
+            "vendor,demo-sensor",
+            "vendor,demo-sensor-v2",
+            "demosoc,sensor",
+        ]
+        assert [irq.name for irq in model.irq_resources] == ["done", "error"]
+        assert [irq.index for irq in model.irq_resources] == [0, 1]
+        assert model.irq_resources[0].source == "probe"
+        assert model.irq_resources[1].source == "platform"
+        assert model.device_tree.interrupt_names == ["done", "error"]
+
+    def test_builder_falls_back_to_interrupt_model_lines_for_irq_resources(self):
+        peripheral = Peripheral(
+            name="TIMER",
+            base_address=0x40000000,
+            address_size=0x40,
+            mcu_family="DemoSoC",
+            register_block=RegisterBlock(name="TIMER", base_address=0x40000000),
+            interrupt_model=InterruptModel(
+                peripheral_name="TIMER",
+                lines=[
+                    InterruptLine(irq_number=7, name="timer_update"),
+                    InterruptLine(irq_number=8, name="timer_capture"),
+                ],
+            ),
+        )
+
+        model = build_qemu_hardware_model(peripheral)
+
+        assert [irq.name for irq in model.irq_resources] == ["timer_update", "timer_capture"]
+        assert [irq.index for irq in model.irq_resources] == [0, 1]
+        assert [irq.irq_number for irq in model.irq_resources] == [7, 8]
+        assert model.device_tree.interrupt_names == ["timer_update", "timer_capture"]

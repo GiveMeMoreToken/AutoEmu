@@ -20,6 +20,7 @@ from autoemu.modeling_utils import (
 from autoemu.models.dependency import DependencyGraph, DependencyType
 from autoemu.models.interrupt import InterruptModel
 from autoemu.models.peripheral import ClockConfig, Peripheral, PeripheralType
+from autoemu.models.qemu import build_qemu_hardware_model
 from autoemu.models.register import Register, RegisterBlock
 from autoemu.models.state_machine import StateMachine
 from autoemu.parsers.driver_parser import DriverAnalysis, RegisterAccess, analyze_driver_file
@@ -229,6 +230,10 @@ def generate_model_bundle(
     peripheral_json_path.write_text(peripheral.model_dump_json(indent=2), encoding="utf-8")
 
     generated_files = [str(peripheral_json_path)]
+    qemu_hardware = build_qemu_hardware_model(peripheral, driver_analysis)
+    qemu_hardware_path = output_path / f"{snake}_qemu_hardware.json"
+    qemu_hardware_path.write_text(qemu_hardware.model_dump_json(indent=2), encoding="utf-8")
+    generated_files.append(str(qemu_hardware_path))
     generated_files.extend(generate_peripheral_code(peripheral, output_path))
     generated_files.extend(generate_test_harness(peripheral, output_path))
 
@@ -245,6 +250,8 @@ def generate_model_bundle(
     return {
         "peripheral": peripheral.model_dump(),
         "peripheral_json": str(peripheral_json_path),
+        "qemu_hardware": qemu_hardware.model_dump(),
+        "qemu_hardware_json": str(qemu_hardware_path),
         "generated_files": generated_files,
         "validation_report": validation_report,
         "validation_json": str(validation_path),
