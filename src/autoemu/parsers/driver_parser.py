@@ -129,7 +129,8 @@ _RE_IT_CHECK = re.compile(
 )
 _RE_FUNC_DEF = re.compile(
     r"^[ \t]*(?!(?:if|for|while|switch|return)\b)"
-    r"(?:[A-Za-z_][\w\s\*]*?\s+)+"
+    r"(?:[A-Za-z_]\w*\s+)+"
+    r"(?:\*+\s*)*"
     r"([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
     r"(?:[A-Za-z_][\w\s\(\),]*\s*)?\{",
     re.MULTILINE,
@@ -295,6 +296,9 @@ def _extract_register_expr(address_expr: str, macro_args: list[str] | None = Non
 
     for part in reversed(parts):
         stripped = _strip_outer_parens(part)
+        if not allowed_args and re.fullmatch(r"[A-Za-z_]\w*\s*\(.*\)", stripped):
+            return stripped
+
         identifiers = re.findall(r"\b[A-Za-z_]\w*\b", stripped)
         if allowed_args:
             for identifier in reversed(identifiers):
@@ -346,8 +350,8 @@ def _extract_macro_arg_reference(expr: str, arg_names: list[str]) -> str:
     return ""
 
 
-def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
-    wrappers: dict[str, _MMIOWrapper] = {}
+def _extract_mmio_wrappers(content: str) -> dict[str, list[_MMIOWrapper]]:
+    wrappers: dict[str, list[_MMIOWrapper]] = {}
     for macro in _RE_MACRO_DEF.finditer(_join_continued_macro_lines(content)):
         name = macro.group(1)
         arg_names = [arg.strip() for arg in macro.group(2).split(",") if arg.strip()]
@@ -361,14 +365,14 @@ def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
             value_arg = _extract_macro_arg_reference(call_args[0], arg_names)
             register_index = _arg_index(arg_names, register_arg)
             value_index = _arg_index(arg_names, value_arg)
-            if register_index is None or value_index is None:
+            if register_index is None:
                 continue
-            wrappers[name] = _MMIOWrapper(
+            wrappers.setdefault(name, []).append(_MMIOWrapper(
                 name=name,
                 access_type="write",
                 register_arg_index=register_index,
                 value_arg_index=value_index,
-            )
+            ))
 
         for call in _find_calls(body, "readl"):
             call_args = _split_top_level_args(call)
@@ -378,11 +382,11 @@ def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
             register_index = _arg_index(arg_names, register_arg)
             if register_index is None:
                 continue
-            wrappers[name] = _MMIOWrapper(
+            wrappers.setdefault(name, []).append(_MMIOWrapper(
                 name=name,
                 access_type="read",
                 register_arg_index=register_index,
-            )
+            ))
 
     return wrappers
 
@@ -447,7 +451,7 @@ def _extract_register_accesses(
     func_name: str,
     source_file: str,
     peripheral: str,
-    mmio_wrappers: dict[str, _MMIOWrapper] | None = None,
+    mmio_wrappers: dict[str, list[_MMIOWrapper]] | None = None,
 ) -> list[RegisterAccess]:
     """Extract register accesses from a function body."""
     accesses: list[RegisterAccess] = []
@@ -487,23 +491,27 @@ def _extract_register_accesses(
                 context=context,
             ))
 
-    for wrapper in mmio_wrappers.values():
-        for call in _find_calls(body, wrapper.name):
-            call_args = _split_top_level_args(call)
-            if len(call_args) <= wrapper.register_arg_index:
-                continue
-            register = _strip_outer_parens(call_args[wrapper.register_arg_index])
-            value_expr = ""
-            if wrapper.value_arg_index is not None and len(call_args) > wrapper.value_arg_index:
-                value_expr = _strip_outer_parens(call_args[wrapper.value_arg_index])
-            accesses.append(RegisterAccess(
-                register=register,
-                access_type=wrapper.access_type,
-                value_expr=value_expr,
-                source_file=source_file,
-                in_function=func_name,
-                context=context,
-            ))
+    for wrapper_list in mmio_wrappers.values():
+        for wrapper in wrapper_list:
+            for call in _find_calls(body, wrapper.name):
+                call_args = _split_top_level_args(call)
+                if len(call_args) <= wrapper.register_arg_index:
+                    continue
+                register = _strip_outer_parens(call_args[wrapper.register_arg_index])
+                value_expr = ""
+                if (
+                    wrapper.value_arg_index is not None
+                    and len(call_args) > wrapper.value_arg_index
+                ):
+                    value_expr = _strip_outer_parens(call_args[wrapper.value_arg_index])
+                accesses.append(RegisterAccess(
+                    register=register,
+                    access_type=wrapper.access_type,
+                    value_expr=value_expr,
+                    source_file=source_file,
+                    in_function=func_name,
+                    context=context,
+                ))
 
     for m in _RE_SET_BIT.finditer(body):
         accesses.append(RegisterAccess(

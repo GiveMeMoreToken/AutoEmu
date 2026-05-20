@@ -605,6 +605,22 @@ static irqreturn_t foo_irq_handler(int irq, void *data)
         assert by_register["FOO_IRQ_STATUS"].context == "isr"
         assert by_register["FOO_IRQ_CLEAR"].in_function == "foo_irq_handler"
 
+    def test_generic_linux_direct_mmio_preserves_function_like_register_macro(self):
+        analysis = analyze_driver_string(
+            """\
+static u32 foo_read_indexed(struct foo_dev *foo, int idx)
+{
+    return readl(foo->base + FOO_REG(idx));
+}
+""",
+            "FOO",
+        )
+
+        reads = [a for a in analysis.register_accesses if a.access_type == "read"]
+        assert len(reads) == 1
+        assert reads[0].register == "FOO_REG(idx)"
+        assert reads[0].in_function == "foo_read_indexed"
+
     def test_generic_linux_mmio_wrapper_macros(self):
         analysis = analyze_driver_string(
             """\
@@ -631,6 +647,32 @@ static void foo_reset(struct foo_dev *foo)
         assert by_register["FOO_STATUS"].access_type == "read"
         assert by_register["JOB_CONTROL"].access_type == "write"
         assert by_register["JOB_CONTROL"].value_expr == "start_value"
+
+    def test_generic_linux_read_modify_write_wrapper_emits_read_and_write(self):
+        analysis = analyze_driver_string(
+            """\
+#define foo_rmw(dev, reg, mask, val) \\
+    do { \\
+        u32 tmp = readl((dev)->base + (reg)); \\
+        tmp &= ~(mask); \\
+        tmp |= (val); \\
+        writel(tmp, (dev)->base + (reg)); \\
+    } while (0)
+
+static void foo_config(struct foo_dev *foo)
+{
+    foo_rmw(foo, FOO_CONFIG, FOO_MASK, FOO_VALUE);
+}
+""",
+            "FOO",
+        )
+
+        config_accesses = [
+            a for a in analysis.register_accesses if a.register == "FOO_CONFIG"
+        ]
+        assert [a.access_type for a in config_accesses].count("read") == 1
+        assert [a.access_type for a in config_accesses].count("write") == 1
+        assert all(a.in_function == "foo_config" for a in config_accesses)
 
     def test_generic_linux_multiline_mmio_wrapper_macro(self):
         analysis = analyze_driver_string(
@@ -667,6 +709,18 @@ static void foo_reset(struct foo_dev *foo)
         by_register = {a.register: a for a in analysis.register_accesses}
         assert by_register["FOO_RESET"].access_type == "write"
         assert by_register["FOO_RESET"].value_expr == "reset_value"
+
+    def test_generic_linux_pointer_return_function_on_single_line(self):
+        analysis = analyze_driver_string(
+            """\
+static const struct foo_desc *foo_get_desc(struct foo_dev *foo) { u32 status = readl(foo->base + FOO_DESC); return foo->desc; }
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_DESC"].access_type == "read"
+        assert by_register["FOO_DESC"].in_function == "foo_get_desc"
 
     def test_generic_linux_platform_hints(self):
         analysis = analyze_driver_string(
