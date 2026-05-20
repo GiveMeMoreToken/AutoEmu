@@ -648,6 +648,44 @@ static void foo_reset(struct foo_dev *foo)
         assert by_register["JOB_CONTROL"].access_type == "write"
         assert by_register["JOB_CONTROL"].value_expr == "start_value"
 
+    def test_generic_linux_wrapper_preserves_register_expression_template(self):
+        analysis = analyze_driver_string(
+            """\
+#define foo_read(dev, idx) readl((dev)->base + FOO_REG(idx))
+#define foo_enable(dev) writel(FOO_ENABLE, (dev)->base + FOO_CTRL)
+
+static void foo_config(struct foo_dev *foo, int n)
+{
+    u32 value = foo_read(foo, n);
+    foo_enable(foo);
+}
+""",
+            "FOO",
+        )
+
+        by_type = {a.access_type: a for a in analysis.register_accesses}
+        assert by_type["read"].register == "FOO_REG(n)"
+        assert by_type["write"].register == "FOO_CTRL"
+
+    def test_generic_linux_direct_mmio_accesses_preserve_source_order(self):
+        analysis = analyze_driver_string(
+            """\
+static void foo_config(void __iomem *base)
+{
+    u32 status = readl(base + FOO_STATUS);
+    writel(status, base + FOO_CTRL);
+}
+""",
+            "FOO",
+        )
+
+        assert [
+            (a.access_type, a.register) for a in analysis.register_accesses
+        ] == [
+            ("read", "FOO_STATUS"),
+            ("write", "FOO_CTRL"),
+        ]
+
     def test_generic_linux_read_modify_write_wrapper_emits_read_and_write(self):
         analysis = analyze_driver_string(
             """\
@@ -672,6 +710,7 @@ static void foo_config(struct foo_dev *foo)
         ]
         assert [a.access_type for a in config_accesses].count("read") == 1
         assert [a.access_type for a in config_accesses].count("write") == 1
+        assert [a.access_type for a in config_accesses] == ["read", "write"]
         assert all(a.in_function == "foo_config" for a in config_accesses)
 
     def test_generic_linux_multiline_mmio_wrapper_macro(self):
@@ -721,6 +760,31 @@ static const struct foo_desc *foo_get_desc(struct foo_dev *foo) { u32 status = r
         by_register = {a.register: a for a in analysis.register_accesses}
         assert by_register["FOO_DESC"].access_type == "read"
         assert by_register["FOO_DESC"].in_function == "foo_get_desc"
+
+    def test_generic_linux_else_if_block_is_not_parsed_as_function(self):
+        analysis = analyze_driver_string(
+            """\
+static void foo_config(void __iomem *base, int state)
+{
+    if (state == 1) {
+        writel(1, base + FOO_A);
+    }
+    else if (state == 2) {
+        writel(2, base + FOO_B);
+    }
+}
+""",
+            "FOO",
+        )
+
+        assert [a.in_function for a in analysis.register_accesses] == [
+            "foo_config",
+            "foo_config",
+        ]
+        assert [a.register for a in analysis.register_accesses] == [
+            "FOO_A",
+            "FOO_B",
+        ]
 
     def test_generic_linux_platform_hints(self):
         analysis = analyze_driver_string(
