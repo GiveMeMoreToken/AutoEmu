@@ -313,9 +313,42 @@ def _arg_index(args: list[str], name: str) -> int | None:
         return None
 
 
+def _join_continued_macro_lines(content: str) -> str:
+    logical_lines: list[str] = []
+    current = ""
+
+    for line in content.splitlines():
+        stripped = line.rstrip()
+        if current:
+            current = f"{current} {stripped.lstrip()}"
+        else:
+            current = stripped
+
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+
+        logical_lines.append(current)
+        current = ""
+
+    if current:
+        logical_lines.append(current)
+
+    return "\n".join(logical_lines)
+
+
+def _extract_macro_arg_reference(expr: str, arg_names: list[str]) -> str:
+    allowed_args = set(arg_names)
+    identifiers = re.findall(r"\b[A-Za-z_]\w*\b", expr)
+    for identifier in reversed(identifiers):
+        if identifier in allowed_args:
+            return identifier
+    return ""
+
+
 def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
     wrappers: dict[str, _MMIOWrapper] = {}
-    for macro in _RE_MACRO_DEF.finditer(content):
+    for macro in _RE_MACRO_DEF.finditer(_join_continued_macro_lines(content)):
         name = macro.group(1)
         arg_names = [arg.strip() for arg in macro.group(2).split(",") if arg.strip()]
         body = macro.group(3).strip()
@@ -325,7 +358,7 @@ def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
             if len(call_args) < 2:
                 continue
             register_arg = _extract_register_expr(call_args[1], arg_names)
-            value_arg = _strip_outer_parens(call_args[0])
+            value_arg = _extract_macro_arg_reference(call_args[0], arg_names)
             register_index = _arg_index(arg_names, register_arg)
             value_index = _arg_index(arg_names, value_arg)
             if register_index is None or value_index is None:
@@ -599,9 +632,11 @@ def _extract_function_state_hints(body: str, func_name: str) -> list[dict[str, s
         args = _split_top_level_args(call)
         if len(args) < 2:
             continue
-        irq_name = _strip_outer_parens(args[1]).strip('"')
-        if not irq_name:
+        irq_arg = _strip_outer_parens(args[1])
+        irq_match = re.fullmatch(r'"([^"]*)"', irq_arg)
+        if not irq_match:
             continue
+        irq_name = irq_match.group(1)
         _append_unique_hint(
             hints,
             {"kind": "irq_resource", "name": irq_name, "function": func_name},

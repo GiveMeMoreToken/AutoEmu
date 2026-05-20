@@ -632,6 +632,42 @@ static void foo_reset(struct foo_dev *foo)
         assert by_register["JOB_CONTROL"].access_type == "write"
         assert by_register["JOB_CONTROL"].value_expr == "start_value"
 
+    def test_generic_linux_multiline_mmio_wrapper_macro(self):
+        analysis = analyze_driver_string(
+            """\
+#define foo_write(dev, reg, val) \\
+    writel((val), (dev)->base + (reg))
+
+static void foo_enable(struct foo_dev *foo)
+{
+    foo_write(foo, FOO_ENABLE, enable_value);
+}
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_ENABLE"].access_type == "write"
+        assert by_register["FOO_ENABLE"].value_expr == "enable_value"
+        assert by_register["FOO_ENABLE"].in_function == "foo_enable"
+
+    def test_generic_linux_write_wrapper_infers_casted_value_param(self):
+        analysis = analyze_driver_string(
+            """\
+#define foo_write(dev, reg, val) writel((u32)(val), (dev)->base + (reg))
+
+static void foo_reset(struct foo_dev *foo)
+{
+    foo_write(foo, FOO_RESET, reset_value);
+}
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_RESET"].access_type == "write"
+        assert by_register["FOO_RESET"].value_expr == "reset_value"
+
     def test_generic_linux_platform_hints(self):
         analysis = analyze_driver_string(
             """\
@@ -659,6 +695,24 @@ static int foo_probe(struct platform_device *pdev)
             "name": "job",
             "function": "foo_probe",
         } in analysis.state_hints
+
+    def test_generic_linux_platform_irq_hint_requires_literal_name(self):
+        analysis = analyze_driver_string(
+            """\
+static int foo_probe(struct platform_device *pdev)
+{
+    const char *irq_name = "job";
+
+    return platform_get_irq_byname(pdev, irq_name);
+}
+""",
+            "FOO",
+        )
+
+        assert not [
+            hint for hint in analysis.state_hints
+            if hint.get("kind") == "irq_resource"
+        ]
 
 
 class TestPreprocessHeader:
