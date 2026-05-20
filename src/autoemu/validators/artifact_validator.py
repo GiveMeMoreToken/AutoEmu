@@ -202,6 +202,7 @@ def declared_qemu_tree_artifact_paths(
         layout.source_path,
         layout.header_path,
         layout.meson_snippet_path or layout.meson_path,
+        *_derived_generated_tree_paths(layout.source_path),
         layout.qtest_path,
     ]
     return [
@@ -369,6 +370,16 @@ def _validate_file_layout_paths(model: QEMUHardwareModel, source: str) -> list[I
                 )
             )
     return issues
+
+
+def _derived_generated_tree_paths(source_path: str | Path) -> list[str]:
+    if not _is_safe_relative_path(source_path):
+        return []
+    path = Path(source_path)
+    return [
+        str(path.with_suffix(".kconfig")),
+        str(path.with_suffix(".dtsi")),
+    ]
 
 
 def _is_safe_relative_path(path: str | Path) -> bool:

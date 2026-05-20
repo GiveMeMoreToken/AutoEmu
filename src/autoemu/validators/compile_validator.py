@@ -181,6 +181,8 @@ def validate_compile(
         local_include_flags = list(include_flags)
         parent = str(path.parent.resolve())
         local_include_flags.extend(["-I", parent])
+        for generated_include_path in _generated_tree_include_paths(path):
+            local_include_flags.extend(["-I", generated_include_path])
         # Create a hw/ symlink so #include "hw/prefix_name.h" resolves
         hw_dir = path.parent / "hw"
         hw_symlink_created = False
@@ -247,6 +249,23 @@ def validate_compile(
         "errors": real_errors,
         "warnings": warnings,
     }
+
+
+def _generated_tree_include_paths(path: Path) -> list[str]:
+    """Find generated QEMU tree include roots near a generated source file."""
+    include_paths: list[str] = []
+    seen: set[Path] = set()
+    resolved_path = path.resolve()
+    for ancestor in (resolved_path.parent, *resolved_path.parents):
+        include_dir = ancestor / "include"
+        if not include_dir.is_dir():
+            continue
+        resolved_include = include_dir.resolve()
+        if resolved_include in seen:
+            continue
+        seen.add(resolved_include)
+        include_paths.append(str(resolved_include))
+    return include_paths
 
 
 def _is_missing_system_header(stderr: str) -> bool:

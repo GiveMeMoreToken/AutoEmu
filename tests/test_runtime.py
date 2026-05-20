@@ -173,6 +173,47 @@ def test_run_pipeline_emits_progress(monkeypatch):
     assert any(p.finished for p in progress_log)
 
 
+def test_run_pipeline_fails_when_validation_fails(monkeypatch):
+    """Pipeline result success mirrors validation failure."""
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "artifacts": []}
+
+    def fake_do_build(self, **kwargs):
+        return {"generated_files": ["test.c"]}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {
+            "success": False,
+            "files_checked": 1,
+            "errors": [
+                {
+                    "file": "output/test.c",
+                    "returncode": 1,
+                    "stderr": "syntax error",
+                }
+            ],
+            "warnings": ["checked with fallback include paths"],
+        }
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+    )
+
+    assert result.success is False
+    assert result.error == ""
+    assert result.validation_result["success"] is False
+    assert result.validation_result["files_checked"] == 1
+    assert result.validation_result["errors"][0]["stderr"] == "syntax error"
+    assert result.validation_result["warnings"] == ["checked with fallback include paths"]
+
+
 def test_run_pipeline_handles_fetch_error(monkeypatch):
     """Pipeline handles errors gracefully."""
 
@@ -321,6 +362,8 @@ def _write_declared_qemu_tree_files(base: Path, *, source_text: str = "int demo(
         "hw/misc/demo_device.c": source_text,
         "include/hw/misc/demo_device.h": "#pragma once\nint demo(void);\n",
         "hw/misc/demo_device.meson.inc": "system_ss.add(when: 'CONFIG_DEMO', if_true: files('demo_device.c'))\n",
+        "hw/misc/demo_device.kconfig": "config DEMO_DEVICE\n    bool\n",
+        "hw/misc/demo_device.dtsi": "/ { demo@40010000 { compatible = \"demo,device\"; }; };\n",
         "tests/qtest/demo_device-test.c": "int main(void) { return 0; }\n",
     }
     for rel_path, content in files.items():
@@ -378,8 +421,36 @@ def test_do_validate_fails_when_declared_hardware_artifacts_are_missing(monkeypa
     assert any("hw/misc/demo_device.c" in message for message in messages)
     assert any("include/hw/misc/demo_device.h" in message for message in messages)
     assert any("hw/misc/demo_device.meson.inc" in message for message in messages)
+    assert any("hw/misc/demo_device.kconfig" in message for message in messages)
+    assert any("hw/misc/demo_device.dtsi" in message for message in messages)
     assert any("tests/qtest/demo_device-test.c" in message for message in messages)
     assert not any("hw/misc/meson.build" in message for message in messages)
+
+
+def test_do_validate_fails_when_generated_kconfig_or_dtsi_is_empty(monkeypatch, tmp_path):
+    _write_valid_qemu_hardware(tmp_path / "demo_qemu_hardware.json")
+    _write_declared_qemu_tree_files(tmp_path)
+    for rel_path, content in {
+        "hw/misc/demo_device.kconfig": " \n\t\n",
+        "hw/misc/demo_device.dtsi": "",
+    }.items():
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", lambda: [])
+
+    result = AutoEmuAgentRuntime()._do_validate(str(tmp_path))
+
+    messages = _validation_error_messages(result)
+    assert result["success"] is False
+    assert any(
+        "hw/misc/demo_device.kconfig" in message and "empty" in message.lower()
+        for message in messages
+    )
+    assert any(
+        "hw/misc/demo_device.dtsi" in message and "empty" in message.lower()
+        for message in messages
+    )
 
 
 def test_do_validate_fails_when_declared_artifact_is_whitespace_only(monkeypatch, tmp_path):
@@ -405,6 +476,8 @@ def test_do_validate_accepts_meson_path_when_snippet_path_is_missing(monkeypatch
         "hw/misc/demo_device.c": "int demo(void) { return 0; }\n",
         "include/hw/misc/demo_device.h": "#pragma once\nint demo(void);\n",
         "hw/misc/meson.build": "system_ss.add(when: 'CONFIG_DEMO', if_true: files('demo_device.c'))\n",
+        "hw/misc/demo_device.kconfig": "config DEMO_DEVICE\n    bool\n",
+        "hw/misc/demo_device.dtsi": "/ { demo@40010000 { compatible = \"demo,device\"; }; };\n",
         "tests/qtest/demo_device-test.c": "int main(void) { return 0; }\n",
     }
     for rel_path, content in files.items():

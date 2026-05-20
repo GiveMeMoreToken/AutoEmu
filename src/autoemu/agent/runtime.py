@@ -385,7 +385,7 @@ class AutoEmuAgentRuntime:
             else:
                 _emit(4, "Validation: warnings only", "warn")
 
-            result.success = True
+            result.success = bool(validation.get("success"))
 
         except Exception as exc:
             result.error = str(exc)

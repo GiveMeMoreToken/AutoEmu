@@ -105,6 +105,32 @@ class TestCompileValidator:
         assert result["success"] is True
         assert result["files_checked"] == 1
 
+    def test_generated_tree_source_resolves_headers_from_tree_include_root(self, tmp_path):
+        fake_qemu = tmp_path / "qemu_src"
+        (fake_qemu / "include" / "qemu").mkdir(parents=True)
+
+        generated_root = tmp_path / "generated"
+        source = generated_root / "hw" / "misc" / "demo_device.c"
+        header = generated_root / "include" / "hw" / "misc" / "demo_device.h"
+        source.parent.mkdir(parents=True)
+        header.parent.mkdir(parents=True)
+        source.write_text(
+            '#include "hw/misc/demo_device.h"\n'
+            "int demo_device_value(void) { return DEMO_DEVICE_VALUE; }\n",
+            encoding="utf-8",
+        )
+        header.write_text(
+            "#pragma once\n"
+            "#define DEMO_DEVICE_VALUE 7\n",
+            encoding="utf-8",
+        )
+
+        result = validate_compile([source], qemu_src=fake_qemu)
+
+        assert result["success"] is True
+        assert result["files_checked"] == 1
+        assert result["errors"] == []
+
     def test_invalid_c_file(self, tmp_path):
         c_file = tmp_path / "bad.c"
         c_file.write_text("int main(void { return 0; }\n")
