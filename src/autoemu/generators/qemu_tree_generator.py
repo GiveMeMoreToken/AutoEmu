@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from autoemu.generators.qemu_generator import (
@@ -87,10 +88,13 @@ def _rewrite_generated_identity(
 ) -> str:
     generated_identity = build_qemu_hardware_model(peripheral).identity
     replacements = _identity_replacements(generated_identity, model.identity)
-    rewritten = content
-    for old, new in replacements:
-        rewritten = rewritten.replace(old, new)
-    return rewritten
+    if not replacements:
+        return content
+    replacement_map: dict[str, str] = {}
+    for old_value, new_value in replacements:
+        replacement_map.setdefault(old_value, new_value)
+    pattern = re.compile("|".join(re.escape(old_value) for old_value, _ in replacements))
+    return pattern.sub(lambda match: replacement_map[match.group(0)], content)
 
 
 def _identity_replacements(old: Any, new: Any) -> list[tuple[str, str]]:

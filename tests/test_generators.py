@@ -369,6 +369,34 @@ class TestQEMUTreeGenerator:
             assert "TEST_PERIPH_REG(offset)" not in qtest
             assert '"/stm32f4/test_periph/reset"' not in qtest
 
+    def test_tree_identity_rewrite_handles_schema_identity_containing_generated_identity(self):
+        periph = _make_mixed_case_test_peripheral()
+        hardware_model = build_qemu_hardware_model(periph)
+        hardware_model.identity = hardware_model.identity.model_copy(
+            update={
+                "peripheral_name": "TestPeriph2",
+                "qom_type": "stm32f4-test_periph2",
+                "c_identifier_prefix": "stm32f4_test_periph2",
+                "type_macro": "TYPE_STM32F4_TEST_PERIPH2",
+                "state_struct_name": "STM32F4TEST_PERIPH2State",
+                "kconfig_symbol": "STM32F4_TEST_PERIPH2",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            source = (Path(tmpdir) / hardware_model.file_layout.source_path).read_text(encoding="utf-8")
+            header = (Path(tmpdir) / hardware_model.file_layout.header_path).read_text(encoding="utf-8")
+            qtest = (Path(tmpdir) / hardware_model.file_layout.qtest_path).read_text(encoding="utf-8")
+
+            assert "TYPE_STM32F4_TEST_PERIPH2" in source
+            assert "TYPE_STM32F4_TEST_PERIPH22" not in source
+            assert "STM32F4TEST_PERIPH2State" in header
+            assert "STM32F4TEST_PERIPH22State" not in header
+            assert "TEST_PERIPH2_REG(offset)" in qtest
+            assert "TEST_PERIPH22_REG(offset)" not in qtest
+
 
 class TestTestGenerator:
     def test_generates_test_file(self):
