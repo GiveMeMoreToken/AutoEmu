@@ -12,7 +12,9 @@ from autoemu.generators.qemu_generator import (
     generate_peripheral_code,
     QEMU_TARGET_VERSION,
 )
+from autoemu.generators.qemu_tree_generator import generate_qemu_tree_artifacts
 from autoemu.generators.test_generator import generate_test_harness
+from autoemu.models.qemu import build_qemu_hardware_model
 
 
 def _make_test_peripheral() -> Peripheral:
@@ -179,6 +181,105 @@ class TestQEMUGenerator:
 
             assert "(s->sr & (1U << 1))" in content
             assert "s-> &" not in content
+
+
+class TestQEMUTreeGenerator:
+    def test_writes_source_and_header_under_schema_tree_paths(self):
+        periph = _make_test_peripheral()
+        hardware_model = build_qemu_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            expected_source = Path(tmpdir) / hardware_model.file_layout.source_path
+            expected_header = Path(tmpdir) / hardware_model.file_layout.header_path
+            assert str(expected_source) in files
+            assert str(expected_header) in files
+            assert expected_source.exists()
+            assert expected_header.exists()
+
+    def test_builds_hardware_model_when_omitted(self):
+        periph = _make_test_peripheral()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(
+                periph,
+                tmpdir,
+                driver_analysis={
+                    "state_hints": [
+                        {"kind": "compatible", "value": "vendor,auto-built"},
+                    ],
+                },
+            )
+
+            dts_path = next(Path(path) for path in files if Path(path).suffix == ".dtsi")
+            dts = dts_path.read_text(encoding="utf-8")
+            assert 'compatible = "vendor,auto-built", "stm32f4,test_periph";' in dts
+
+    def test_meson_and_kconfig_use_schema_identity_and_source_basename(self):
+        periph = _make_test_peripheral()
+        hardware_model = build_qemu_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            source_basename = Path(hardware_model.file_layout.source_path).name
+            meson_path = Path(tmpdir) / hardware_model.file_layout.meson_snippet_path
+            kconfig_path = next(Path(path) for path in files if Path(path).suffix == ".kconfig")
+            meson = meson_path.read_text(encoding="utf-8")
+            kconfig = kconfig_path.read_text(encoding="utf-8")
+
+            assert f"CONFIG_{hardware_model.identity.kconfig_symbol}" in meson
+            assert f"files('{source_basename}')" in meson
+            assert f"config {hardware_model.identity.kconfig_symbol}" in kconfig
+            assert source_basename in kconfig
+
+    def test_device_tree_snippet_uses_32_bit_cells_interrupt_names_and_properties(self):
+        periph = _make_test_peripheral()
+        hardware_model = build_qemu_hardware_model(
+            periph,
+            {
+                "state_hints": [
+                    {"kind": "compatible", "value": "vendor,test-periph"},
+                    {"kind": "irq_resource", "name": "done"},
+                    {"kind": "irq_resource", "name": "error"},
+                ],
+            },
+        )
+        hardware_model.device_tree.properties = {
+            "dma-coherent": True,
+            "clock-frequency": 12_000_000,
+            "status": "okay",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            dts_path = next(Path(path) for path in files if Path(path).suffix == ".dtsi")
+            dts = dts_path.read_text(encoding="utf-8")
+
+            assert 'compatible = "vendor,test-periph", "stm32f4,test_periph";' in dts
+            assert "reg = <0x40000000 0x00000010>;" in dts
+            assert 'interrupt-names = "done", "error";' in dts
+            assert "dma-coherent;" in dts
+            assert "clock-frequency = <12000000>;" in dts
+            assert 'status = "okay";' in dts
+
+    def test_device_tree_snippet_uses_64_bit_reg_cells_for_high_addresses(self):
+        periph = _make_test_peripheral()
+        periph.base_address = 0x1_0000_1000
+        periph.address_size = 0x200
+        hardware_model = build_qemu_hardware_model(periph)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_qemu_tree_artifacts(periph, tmpdir, hardware_model=hardware_model)
+
+            dts_path = next(Path(path) for path in files if Path(path).suffix == ".dtsi")
+            dts = dts_path.read_text(encoding="utf-8")
+
+            assert "#address-cells = <2>;" in dts
+            assert "#size-cells = <1>;" in dts
+            assert "reg = <0x00000001 0x00001000 0x00000200>;" in dts
 
 
 class TestTestGenerator:

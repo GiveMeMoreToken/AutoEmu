@@ -121,6 +121,7 @@ def test_generate_model_bundle_writes_artifacts_and_validation(tmp_path):
     )
 
     generated_names = {Path(path).name for path in result["generated_files"]}
+    generated_paths = {Path(path).relative_to(tmp_path).as_posix() for path in result["generated_files"]}
     assert "usart1_peripheral.json" in generated_names
     assert "usart1_qemu_hardware.json" in generated_names
     assert "stm32f4_usart1.c" in generated_names
@@ -129,6 +130,11 @@ def test_generate_model_bundle_writes_artifacts_and_validation(tmp_path):
     assert "usart1_validation.json" in generated_names
     assert Path(result["qemu_hardware_json"]).name == "usart1_qemu_hardware.json"
     assert Path(result["qemu_hardware_json"]).exists()
+    assert "qemu_tree_files" in result
+    assert set(result["qemu_tree_files"]).issubset(set(result["generated_files"]))
+    assert "hw/misc/stm32f4_usart1.c" in generated_paths
+    assert "include/hw/misc/stm32f4_usart1.h" in generated_paths
+    assert "tests/qtest/stm32f4_usart1-test.c" in generated_paths
     qemu_hardware = Path(result["qemu_hardware_json"]).read_text(encoding="utf-8")
     assert '"qom_type": "stm32f4-usart1"' in qemu_hardware
     assert result["validation_report"]["success"]

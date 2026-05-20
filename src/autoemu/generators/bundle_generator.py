@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from autoemu.generators.qemu_generator import generate_peripheral_code
+from autoemu.generators.qemu_tree_generator import generate_qemu_tree_artifacts
 from autoemu.generators.test_generator import generate_test_harness
 from autoemu.inference.dependency_inference import load_dependency_graph_json
 from autoemu.modeling_utils import (
@@ -235,6 +236,13 @@ def generate_model_bundle(
     qemu_hardware_path.write_text(qemu_hardware.model_dump_json(indent=2), encoding="utf-8")
     generated_files.append(str(qemu_hardware_path))
     generated_files.extend(generate_peripheral_code(peripheral, output_path))
+    qemu_tree_files = generate_qemu_tree_artifacts(
+        peripheral,
+        output_path,
+        hardware_model=qemu_hardware,
+        driver_analysis=driver_analysis,
+    )
+    generated_files.extend(qemu_tree_files)
     generated_files.extend(generate_test_harness(peripheral, output_path))
 
     compile_result = validate_compile(
@@ -252,6 +260,7 @@ def generate_model_bundle(
         "peripheral_json": str(peripheral_json_path),
         "qemu_hardware": qemu_hardware.model_dump(),
         "qemu_hardware_json": str(qemu_hardware_path),
+        "qemu_tree_files": qemu_tree_files,
         "generated_files": generated_files,
         "validation_report": validation_report,
         "validation_json": str(validation_path),
