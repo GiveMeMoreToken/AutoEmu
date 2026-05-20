@@ -1,10 +1,11 @@
-"""HAL/LL driver code parser for behavioral analysis.
+"""Driver code parser for behavioral analysis.
 
-Analyzes STM32 HAL and LL driver source code to extract:
+Analyzes STM32 HAL/LL and generic Linux MMIO driver source code to extract:
 - Register access patterns (read/write sequences)
 - Interrupt handler logic (ISR flag checking and clearing)
 - State transitions triggered by driver operations
 - DMA configuration patterns
+- Platform binding/resource hints
 """
 
 from __future__ import annotations
@@ -82,6 +83,16 @@ class DriverAnalysis:
     state_hints: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass
+class _MMIOWrapper:
+    """A function-like macro that maps to Linux MMIO accessors."""
+
+    name: str
+    access_type: str
+    register_arg_index: int
+    value_arg_index: int | None = None
+
+
 # Patterns for STM32 HAL/LL driver analysis
 _RE_HAL_REG_WRITE = re.compile(
     r"((?:\w+->)*)?(\w+)->(\w+)\s*=\s*(.+?);"
@@ -117,8 +128,10 @@ _RE_IT_CHECK = re.compile(
     r"__HAL_(\w+)_GET_IT_SOURCE\s*\(\s*\w+\s*,\s*(\w+)\s*\)"
 )
 _RE_FUNC_DEF = re.compile(
-    r"^(?:HAL_StatusTypeDef|void|static\s+void|static\s+HAL_StatusTypeDef)"
-    r"\s+(HAL_\w+|LL_\w+)\s*\(",
+    r"^[ \t]*(?!(?:if|for|while|switch|return)\b)"
+    r"(?:[A-Za-z_][\w\s\*]*?\s+)+"
+    r"([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
+    r"(?:[A-Za-z_][\w\s\(\),]*\s*)?\{",
     re.MULTILINE,
 )
 _RE_ISR_FUNC = re.compile(
@@ -138,6 +151,11 @@ _RE_CLEAR_CALL = re.compile(
     r"__HAL_[A-Z0-9_]*CLEAR[A-Z0-9_]*\s*\((.*?)\)\s*;",
     re.DOTALL,
 )
+_RE_MACRO_DEF = re.compile(
+    r"^[ \t]*#\s*define\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(.+)$",
+    re.MULTILINE,
+)
+_RE_COMPATIBLE = re.compile(r"\.compatible\s*=\s*\"([^\"]+)\"")
 
 
 def _unique_in_order(values: list[str]) -> list[str]:
@@ -156,6 +174,186 @@ def _looks_like_enable_register(register_name: str) -> bool:
     return any(token in normalized for token in ("IER", "IMR", "MSK", "MASK", "CR"))
 
 
+def _append_unique_hint(hints: list[dict[str, str]], hint: dict[str, str]) -> None:
+    if hint not in hints:
+        hints.append(hint)
+
+
+def _strip_outer_parens(expr: str) -> str:
+    expr = expr.strip()
+    while expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        wraps = True
+        for index, char in enumerate(expr):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0 and index != len(expr) - 1:
+                    wraps = False
+                    break
+        if not wraps:
+            break
+        expr = expr[1:-1].strip()
+    return expr
+
+
+def _split_top_level_args(arg_text: str) -> list[str]:
+    args: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = ""
+    escaped = False
+
+    for char in arg_text:
+        if quote:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            current.append(char)
+        elif char in "([{":
+            depth += 1
+            current.append(char)
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "," and depth == 0:
+            args.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+
+    if current or arg_text.strip():
+        args.append("".join(current).strip())
+    return args
+
+
+def _find_calls(content: str, name: str) -> list[str]:
+    calls: list[str] = []
+    for match in re.finditer(rf"\b{re.escape(name)}\s*\(", content):
+        open_pos = content.find("(", match.start())
+        depth = 1
+        pos = open_pos + 1
+        quote = ""
+        escaped = False
+
+        while pos < len(content) and depth > 0:
+            char = content[pos]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+            elif char in ("'", '"'):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            pos += 1
+
+        if depth == 0:
+            calls.append(content[open_pos + 1:pos - 1])
+    return calls
+
+
+def _split_top_level_plus(expr: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in expr:
+        if char in "([{":
+            depth += 1
+            current.append(char)
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char == "+" and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+
+    if current or expr.strip():
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _extract_register_expr(address_expr: str, macro_args: list[str] | None = None) -> str:
+    parts = _split_top_level_plus(address_expr)
+    allowed_args = set(macro_args or [])
+
+    for part in reversed(parts):
+        stripped = _strip_outer_parens(part)
+        identifiers = re.findall(r"\b[A-Za-z_]\w*\b", stripped)
+        if allowed_args:
+            for identifier in reversed(identifiers):
+                if identifier in allowed_args:
+                    return identifier
+        elif identifiers:
+            return identifiers[-1]
+
+    return ""
+
+
+def _arg_index(args: list[str], name: str) -> int | None:
+    try:
+        return args.index(name)
+    except ValueError:
+        return None
+
+
+def _extract_mmio_wrappers(content: str) -> dict[str, _MMIOWrapper]:
+    wrappers: dict[str, _MMIOWrapper] = {}
+    for macro in _RE_MACRO_DEF.finditer(content):
+        name = macro.group(1)
+        arg_names = [arg.strip() for arg in macro.group(2).split(",") if arg.strip()]
+        body = macro.group(3).strip()
+
+        for call in _find_calls(body, "writel"):
+            call_args = _split_top_level_args(call)
+            if len(call_args) < 2:
+                continue
+            register_arg = _extract_register_expr(call_args[1], arg_names)
+            value_arg = _strip_outer_parens(call_args[0])
+            register_index = _arg_index(arg_names, register_arg)
+            value_index = _arg_index(arg_names, value_arg)
+            if register_index is None or value_index is None:
+                continue
+            wrappers[name] = _MMIOWrapper(
+                name=name,
+                access_type="write",
+                register_arg_index=register_index,
+                value_arg_index=value_index,
+            )
+
+        for call in _find_calls(body, "readl"):
+            call_args = _split_top_level_args(call)
+            if not call_args:
+                continue
+            register_arg = _extract_register_expr(call_args[0], arg_names)
+            register_index = _arg_index(arg_names, register_arg)
+            if register_index is None:
+                continue
+            wrappers[name] = _MMIOWrapper(
+                name=name,
+                access_type="read",
+                register_arg_index=register_index,
+            )
+
+    return wrappers
+
+
 def _extract_function_bodies(content: str) -> dict[str, str]:
     """Extract function name -> function body mappings.
 
@@ -167,7 +365,7 @@ def _extract_function_bodies(content: str) -> dict[str, str]:
             func_name = m.group(1)
             start = m.start()
             # Find the opening brace
-            brace_pos = content.find("{", start)
+            brace_pos = m.end() - 1
             if brace_pos < 0:
                 continue
             # Match braces
@@ -192,7 +390,7 @@ def _classify_function(name: str) -> str:
         return "init"
     if "deinit" in lower:
         return "deinit"
-    if "irqhandler" in lower or "_isr" in lower:
+    if "irqhandler" in lower or "irq_handler" in lower or "_isr" in lower:
         return "isr"
     if "enable" in lower:
         return "enable"
@@ -212,11 +410,67 @@ def _classify_function(name: str) -> str:
 
 
 def _extract_register_accesses(
-    body: str, func_name: str, source_file: str, peripheral: str
+    body: str,
+    func_name: str,
+    source_file: str,
+    peripheral: str,
+    mmio_wrappers: dict[str, _MMIOWrapper] | None = None,
 ) -> list[RegisterAccess]:
     """Extract register accesses from a function body."""
     accesses: list[RegisterAccess] = []
     context = _classify_function(func_name)
+    mmio_wrappers = mmio_wrappers or {}
+
+    for call in _find_calls(body, "writel"):
+        call_args = _split_top_level_args(call)
+        if len(call_args) < 2:
+            continue
+        register = _extract_register_expr(call_args[1])
+        if not register:
+            continue
+        accesses.append(RegisterAccess(
+            register=register,
+            access_type="write",
+            value_expr=call_args[0],
+            source_file=source_file,
+            in_function=func_name,
+            context=context,
+        ))
+
+    for call_name in ("readl", "readl_poll_timeout"):
+        for call in _find_calls(body, call_name):
+            call_args = _split_top_level_args(call)
+            if not call_args:
+                continue
+            register = _extract_register_expr(call_args[0])
+            if not register:
+                continue
+            accesses.append(RegisterAccess(
+                register=register,
+                access_type="read",
+                value_expr="",
+                source_file=source_file,
+                in_function=func_name,
+                context=context,
+            ))
+
+    for wrapper in mmio_wrappers.values():
+        for call in _find_calls(body, wrapper.name):
+            call_args = _split_top_level_args(call)
+            if len(call_args) <= wrapper.register_arg_index:
+                continue
+            register = _strip_outer_parens(call_args[wrapper.register_arg_index])
+            value_expr = ""
+            if wrapper.value_arg_index is not None and len(call_args) > wrapper.value_arg_index:
+                value_expr = _strip_outer_parens(call_args[wrapper.value_arg_index])
+            accesses.append(RegisterAccess(
+                register=register,
+                access_type=wrapper.access_type,
+                value_expr=value_expr,
+                source_file=source_file,
+                in_function=func_name,
+                context=context,
+            ))
 
     for m in _RE_SET_BIT.finditer(body):
         accesses.append(RegisterAccess(
@@ -329,6 +583,32 @@ def _extract_dma_configs(body: str, peripheral: str) -> list[DMAConfig]:
     return configs
 
 
+def _extract_global_state_hints(content: str) -> list[dict[str, str]]:
+    hints: list[dict[str, str]] = []
+    for match in _RE_COMPATIBLE.finditer(content):
+        _append_unique_hint(
+            hints,
+            {"kind": "compatible", "value": match.group(1)},
+        )
+    return hints
+
+
+def _extract_function_state_hints(body: str, func_name: str) -> list[dict[str, str]]:
+    hints: list[dict[str, str]] = []
+    for call in _find_calls(body, "platform_get_irq_byname"):
+        args = _split_top_level_args(call)
+        if len(args) < 2:
+            continue
+        irq_name = _strip_outer_parens(args[1]).strip('"')
+        if not irq_name:
+            continue
+        _append_unique_hint(
+            hints,
+            {"kind": "irq_resource", "name": irq_name, "function": func_name},
+        )
+    return hints
+
+
 def analyze_driver_file(path: str | Path, peripheral_name: str = "") -> DriverAnalysis:
     """Analyze a HAL/LL driver source file.
 
@@ -357,12 +637,21 @@ def analyze_driver_file(path: str | Path, peripheral_name: str = "") -> DriverAn
     )
 
     functions = _extract_function_bodies(content)
+    mmio_wrappers = _extract_mmio_wrappers(content)
+    analysis.state_hints.extend(_extract_global_state_hints(content))
 
     for func_name, body in functions.items():
-        accesses = _extract_register_accesses(body, func_name, source_file, peripheral_name)
+        accesses = _extract_register_accesses(
+            body, func_name, source_file, peripheral_name, mmio_wrappers
+        )
         analysis.register_accesses.extend(accesses)
+        analysis.state_hints.extend(_extract_function_state_hints(body, func_name))
 
-        if "IRQHandler" in func_name or "isr" in func_name.lower():
+        if (
+            "IRQHandler" in func_name
+            or "irq_handler" in func_name.lower()
+            or "isr" in func_name.lower()
+        ):
             isr = _extract_isr_pattern(body, func_name, peripheral_name)
             isr.register_accesses = accesses
             analysis.isr_patterns.append(isr)
@@ -420,12 +709,21 @@ def analyze_driver_string(content: str, peripheral_name: str = "") -> DriverAnal
     )
 
     functions = _extract_function_bodies(content)
+    mmio_wrappers = _extract_mmio_wrappers(content)
+    analysis.state_hints.extend(_extract_global_state_hints(content))
 
     for func_name, body in functions.items():
-        accesses = _extract_register_accesses(body, func_name, "<string>", peripheral_name)
+        accesses = _extract_register_accesses(
+            body, func_name, "<string>", peripheral_name, mmio_wrappers
+        )
         analysis.register_accesses.extend(accesses)
+        analysis.state_hints.extend(_extract_function_state_hints(body, func_name))
 
-        if "IRQHandler" in func_name or "isr" in func_name.lower():
+        if (
+            "IRQHandler" in func_name
+            or "irq_handler" in func_name.lower()
+            or "isr" in func_name.lower()
+        ):
             isr = _extract_isr_pattern(body, func_name, peripheral_name)
             isr.register_accesses = accesses
             analysis.isr_patterns.append(isr)

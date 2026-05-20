@@ -568,6 +568,98 @@ void HAL_ETH_Foo(ETH_HandleTypeDef *heth)
         assert "gState" not in written_regs
         assert "TxCpltCallback" not in written_regs
 
+    def test_generic_linux_direct_mmio_accesses(self):
+        analysis = analyze_driver_string(
+            """\
+static int foo_probe(struct platform_device *pdev)
+{
+    void __iomem *base = devm_platform_ioremap_resource(pdev, 0);
+    u32 status;
+    int ret;
+
+    writel(FOO_ENABLE | mode, base + FOO_CTRL);
+    status = readl(base + FOO_STATUS);
+    ret = readl_poll_timeout(base + FOO_READY, status,
+                             status & READY_BIT, 10, 1000);
+    return ret;
+}
+
+static irqreturn_t foo_irq_handler(int irq, void *data)
+{
+    struct foo_dev *foo = data;
+    u32 status = readl(foo->base + FOO_IRQ_STATUS);
+
+    writel(status, foo->base + FOO_IRQ_CLEAR);
+    return IRQ_HANDLED;
+}
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_CTRL"].access_type == "write"
+        assert by_register["FOO_CTRL"].value_expr == "FOO_ENABLE | mode"
+        assert by_register["FOO_CTRL"].in_function == "foo_probe"
+        assert by_register["FOO_STATUS"].access_type == "read"
+        assert by_register["FOO_READY"].access_type == "read"
+        assert by_register["FOO_IRQ_STATUS"].context == "isr"
+        assert by_register["FOO_IRQ_CLEAR"].in_function == "foo_irq_handler"
+
+    def test_generic_linux_mmio_wrapper_macros(self):
+        analysis = analyze_driver_string(
+            """\
+#define gpu_write(dev, reg, data) writel(data, dev->iomem + reg)
+#define gpu_read(dev, reg) readl(dev->iomem + reg)
+#define job_write(dev, reg, data) writel(data, dev->iomem + (reg))
+
+static void foo_reset(struct foo_dev *foo)
+{
+    u32 status;
+
+    gpu_write(foo, FOO_CTRL, CTRL_RESET);
+    status = gpu_read(foo, FOO_STATUS);
+    job_write(foo, JOB_CONTROL, start_value);
+}
+""",
+            "FOO",
+        )
+
+        by_register = {a.register: a for a in analysis.register_accesses}
+        assert by_register["FOO_CTRL"].access_type == "write"
+        assert by_register["FOO_CTRL"].value_expr == "CTRL_RESET"
+        assert by_register["FOO_CTRL"].in_function == "foo_reset"
+        assert by_register["FOO_STATUS"].access_type == "read"
+        assert by_register["JOB_CONTROL"].access_type == "write"
+        assert by_register["JOB_CONTROL"].value_expr == "start_value"
+
+    def test_generic_linux_platform_hints(self):
+        analysis = analyze_driver_string(
+            """\
+static const struct of_device_id foo_of_match[] = {
+    { .compatible = "vendor,device" },
+    { .compatible = "vendor,device-v2" },
+    { /* sentinel */ }
+};
+
+static int foo_probe(struct platform_device *pdev)
+{
+    int irq;
+
+    irq = platform_get_irq_byname(pdev, "job");
+    return irq;
+}
+""",
+            "FOO",
+        )
+
+        assert {"kind": "compatible", "value": "vendor,device"} in analysis.state_hints
+        assert {"kind": "compatible", "value": "vendor,device-v2"} in analysis.state_hints
+        assert {
+            "kind": "irq_resource",
+            "name": "job",
+            "function": "foo_probe",
+        } in analysis.state_hints
+
 
 class TestPreprocessHeader:
     def test_ifdef_defined_symbol_included(self):
