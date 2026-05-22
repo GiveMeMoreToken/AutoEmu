@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from enum import Enum
 import json
+from pathlib import Path
+
 import pytest
 
 from autoemu.agent.backend import ToolSpec
@@ -11,6 +14,7 @@ from autoemu.agent.backends.anthropic_api_backend import AnthropicApiBackend
 from autoemu.agent.backends.claude_backend import ClaudeSdkBackend
 from autoemu.agent.backends.codex_backend import CodexSdkBackend
 from autoemu.agent.backends.openai_api_backend import OpenAIApiBackend
+from autoemu.agent.prompts import QEMU_GENERATION_PROMPT, SYSTEM_PROMPT, build_system_prompt
 from autoemu.agent.tools import ALL_TOOLS, TOOL_NAMES
 from autoemu.agent.orchestrator import AutoEmuOrchestrator, ModelingTask
 
@@ -54,6 +58,22 @@ class TestToolSpec:
         result = await tool.handler({"directory": str(tmp_path), "pattern": "*.txt"})
         text = result["content"][0]["text"]
         assert "a.txt" in text and "b.txt" in text
+
+
+class TestPrompts:
+    def test_prompts_target_latest_qemu_not_v924(self):
+        prompt = SYSTEM_PROMPT + "\n" + QEMU_GENERATION_PROMPT
+
+        assert "latest upstream QEMU" in prompt
+        assert "9.2.4" not in prompt
+        assert "v9.2.4" not in prompt
+
+    def test_assembled_prompt_does_not_reintroduce_v924_from_constraints(self):
+        prompt = build_system_prompt(mode="model", cwd=str(Path.cwd()))
+
+        assert "latest upstream QEMU" in prompt
+        assert "9.2.4" not in prompt
+        assert "v9.2.4" not in prompt
 
 
 # ------------------------------------------------------------------ Factory
@@ -137,6 +157,22 @@ class TestBackendConversion:
 class TestCodexSdkBackend:
     """Tests that CodexSdkBackend.run() emits AutoEmu AgentEvents."""
 
+    def test_patches_legacy_service_tier_enum_to_accept_new_sdk_values(self, monkeypatch):
+        from autoemu.agent.backends import codex_backend as mod
+
+        class _FakeServiceTier(Enum):
+            fast = "fast"
+            flex = "flex"
+
+        monkeypatch.setattr(mod, "ServiceTier", _FakeServiceTier, raising=False)
+
+        with pytest.raises(ValueError):
+            _FakeServiceTier("priority")
+
+        mod._patch_codex_service_tier_enum()
+
+        assert _FakeServiceTier("priority") is _FakeServiceTier.fast
+
     @pytest.mark.asyncio
     async def test_emits_text_and_complete_events(self, monkeypatch):
         from autoemu.agent.backends import codex_backend as mod
@@ -155,6 +191,9 @@ class TestCodexSdkBackend:
                 return _FakeResult()
 
         class _FakeAsyncCodex:
+            def __init__(self, config=None):
+                captured["config"] = config
+
             async def __aenter__(self):
                 return self
 
@@ -184,7 +223,125 @@ class TestCodexSdkBackend:
             "model": "gpt-5.4",
             "cwd": "/tmp",
             "developer_instructions": "system",
+            "sandbox": "danger-full-access",
+            "approval_policy": "never",
+            "service_tier": "fast",
         }
+
+    @pytest.mark.asyncio
+    async def test_uses_system_codex_binary_when_sdk_runtime_package_is_absent(self, monkeypatch):
+        from autoemu.agent.backends import codex_backend as mod
+
+        captured: dict[str, object] = {}
+
+        class _FakeConfig:
+            def __init__(self, *, codex_bin=None, config_overrides=()):
+                self.codex_bin = codex_bin
+                self.config_overrides = config_overrides
+
+        class _FakeResult:
+            final_response = ""
+
+        class _FakeThread:
+            async def run(self, prompt, **kwargs):
+                return _FakeResult()
+
+        class _FakeAsyncCodex:
+            def __init__(self, config=None):
+                captured["config"] = config
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def thread_start(self, **kwargs):
+                return _FakeThread()
+
+        monkeypatch.setattr(mod, "AsyncCodex", _FakeAsyncCodex)
+        monkeypatch.setattr(mod, "AppServerConfig", _FakeConfig, raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/codex" if name == "codex" else None)
+
+        events = []
+        async for ev in mod.CodexSdkBackend().run("Say hello", tools=[]):
+            events.append(ev)
+
+        assert [e.type for e in events] == ["complete"]
+        assert captured["config"].codex_bin == "/usr/local/bin/codex"
+        assert captured["config"].config_overrides == (
+            'sandbox_mode="danger-full-access"',
+            'approval_policy="never"',
+        )
+
+    @pytest.mark.asyncio
+    async def test_supports_new_codex_app_server_sdk_client_api(self, monkeypatch):
+        from autoemu.agent.backends import codex_backend as mod
+
+        captured: dict[str, object] = {}
+
+        class _FakeThreadConfig:
+            def __init__(self, **kwargs):
+                captured["thread_config"] = kwargs
+
+        class _FakeResult:
+            final_text = "hello from new sdk"
+
+        class _FakeClient:
+            @classmethod
+            def connect_stdio(cls, **kwargs):
+                captured["connect_kwargs"] = kwargs
+                return cls()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def chat_once(self, prompt, **kwargs):
+                captured["prompt"] = prompt
+                captured["chat_kwargs"] = kwargs
+                return _FakeResult()
+
+        monkeypatch.setattr(mod, "AsyncCodex", None)
+        monkeypatch.setattr(mod, "CodexClient", _FakeClient, raising=False)
+        monkeypatch.setattr(mod, "ThreadConfig", _FakeThreadConfig, raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/codex" if name == "codex" else None)
+
+        events = []
+        async for ev in mod.CodexSdkBackend().run(
+            "Say hello",
+            system_prompt="system",
+            tools=[],
+            model="gpt-5.5",
+            cwd="output",
+        ):
+            events.append(ev)
+
+        expected_cwd = str(Path("output").resolve())
+        assert [e.type for e in events] == ["text", "complete"]
+        assert events[0].text == "hello from new sdk"
+        assert captured["connect_kwargs"] == {
+            "command": [
+                "/usr/local/bin/codex",
+                "--config",
+                'sandbox_mode="danger-full-access"',
+                "--config",
+                'approval_policy="never"',
+                "app-server",
+            ],
+            "cwd": expected_cwd,
+        }
+        assert captured["thread_config"] == {
+            "cwd": expected_cwd,
+            "developer_instructions": "system",
+            "model": "gpt-5.5",
+            "sandbox": "danger-full-access",
+            "approval_policy": "never",
+            "service_tier": "fast",
+        }
+        assert captured["chat_kwargs"]["thread_config"] is not None
 
 
 class _FakeFunction:

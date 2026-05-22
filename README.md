@@ -5,7 +5,7 @@ targets.
 
 AutoEmu takes a target MCU or board name plus a peripheral identifier, gathers
 or accepts hardware inputs, builds a structured peripheral model, emits
-QEMU v9.2.4-compatible artifacts, and validates the generated bundle.
+latest-upstream-QEMU-compatible artifacts, and validates the generated bundle.
 
 The deterministic harness path is the primary implementation. Agent backends
 are optional helpers for fetch/build enrichment; they do not replace the local
@@ -99,8 +99,10 @@ pyinstaller autoemu.spec --clean
 ```
 
 Compilation validation uses `cc`, `gcc`, or `clang` when present. Full QEMU
-header validation is enabled when a QEMU v9.2.4 source tree exists at
-`build/qemu-src/qemu-9.2.4`.
+header validation is enabled when AutoEmu can resolve a QEMU source tree. Set
+`AUTOEMU_QEMU_SRC=/path/to/qemu` for an existing checkout, or
+`AUTOEMU_QEMU_SRC=latest` to clone/update the upstream QEMU master branch in
+AutoEmu's managed cache.
 
 ## Usage
 
@@ -175,6 +177,9 @@ anthropic_base_url = ""
 
 openai_api_key = ""
 openai_base_url = ""
+
+[validation]
+qemu_src = ""                  # Existing QEMU checkout, or "latest"
 ```
 
 Environment variables override the config file:
@@ -188,6 +193,7 @@ Environment variables override the config file:
 | `ANTHROPIC_BASE_URL` | Anthropic / Claude-compatible endpoint |
 | `OPENAI_API_KEY` | OpenAI-compatible API key |
 | `OPENAI_BASE_URL` | OpenAI-compatible endpoint |
+| `AUTOEMU_QEMU_SRC` | Existing QEMU source checkout, or `latest` for upstream master in AutoEmu's cache |
 
 Backend modes:
 

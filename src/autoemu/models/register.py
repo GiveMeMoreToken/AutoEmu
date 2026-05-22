@@ -112,6 +112,7 @@ class RegisterBlock(BaseModel):
     name: str
     description: str = ""
     base_address: int = 0
+    address_size: int = 0
     registers: list[Register] = Field(default_factory=list)
 
     def get_register(self, name: str) -> Register | None:

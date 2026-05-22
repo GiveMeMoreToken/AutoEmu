@@ -21,3 +21,10 @@ backend = "harness"
 # (alternatively set ANTHROPIC_BASE_URL / OPENAI_BASE_URL env vars)
 # anthropic_base_url = "https://api.anthropic.com"
 # openai_base_url = "https://api.openai.com/v1"
+
+[validation]
+# Optional QEMU source tree for generated-code compatibility checks.
+# Use an existing checkout, or "latest" to clone/update the upstream master
+# branch in AutoEmu's managed cache.
+# qemu_src = "/path/to/qemu"
+# qemu_src = "latest"

@@ -19,7 +19,11 @@ from autoemu.fetchers.generic import (
 )
 from autoemu.modeling_utils import normalize_name as _snake
 from autoemu.pipeline import run_target_model_pipeline
-from autoemu.validators.compile_validator import validate_compile, find_qemu_include_paths, QEMU_SOURCE_DIR
+from autoemu.validators.compile_validator import (
+    find_qemu_include_paths,
+    qemu_source_hint,
+    validate_compile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +108,14 @@ class AgentRuntimeConfig:
     anthropic_base_url: str = ""
     openai_api_key: str = ""
     openai_base_url: str = ""
+    qemu_src: str = ""
 
     @classmethod
     def load(cls) -> AgentRuntimeConfig:
         """Build config from environment variables, .autoemu.toml, then defaults."""
         file_cfg = _load_config_file()
         agent_cfg = file_cfg.get("agent", {})
+        validation_cfg = file_cfg.get("validation", {})
 
         def _setting(file_key: str, env_key: str, default: Any = "") -> Any:
             env_value = os.getenv(env_key)
@@ -145,6 +151,10 @@ class AgentRuntimeConfig:
         openai_base = str(
             _setting("openai_base_url", "OPENAI_BASE_URL", "")
         ).strip()
+        qemu_src = str(
+            os.getenv("AUTOEMU_QEMU_SRC", "").strip()
+            or validation_cfg.get("qemu_src", "")
+        ).strip()
 
         # Inject into environment so SDKs pick them up
         if anthropic_key:
@@ -164,6 +174,7 @@ class AgentRuntimeConfig:
             anthropic_base_url=anthropic_base,
             openai_api_key=openai_key,
             openai_base_url=openai_base,
+            qemu_src=qemu_src,
         )
 
     # Keep the old name as alias
@@ -181,6 +192,7 @@ def _cleanup_stale_files(data_dir: str, _log: Callable) -> None:
         "svd":    "svd",
         "header": "header",
         "driver": "driver",
+        "docs":   "docs",
     }
     base = Path(data_dir)
     if not base.is_dir():
@@ -375,9 +387,19 @@ class AutoEmuAgentRuntime:
             elif has_errors:
                 _emit(4, "Validation: ISSUES FOUND", "fail")
             else:
-                _emit(4, "Validation: warnings only", "warn")
+                _emit(4, "Validation: FAILED", "fail")
 
-            result.success = True
+            agent_errors = _phase_agent_errors(fetch_result, build_result)
+            for agent_error in agent_errors:
+                _emit(4, agent_error, "warn" if ok else "fail")
+
+            failure_reasons: list[str] = []
+            if not ok:
+                failure_reasons.append(_validation_failure_summary(validation))
+                failure_reasons.extend(agent_errors)
+
+            result.success = not failure_reasons
+            result.error = "; ".join(reason for reason in failure_reasons if reason)
 
         except Exception as exc:
             result.error = str(exc)
@@ -389,7 +411,7 @@ class AutoEmuAgentRuntime:
                 ))
 
         if on_progress:
-            on_progress(PipelineProgress(finished=True))
+            on_progress(PipelineProgress(finished=True, error=result.error))
 
         return result
 
@@ -413,12 +435,17 @@ class AutoEmuAgentRuntime:
         _log("Running web search queries ...", "search")
         candidates = fetcher.discover_candidates(target_mcu, target_peripheral)
         _log(f"Found {len(candidates)} candidate(s)", "search")
-        for c in candidates[:10]:
+        select_candidates = getattr(fetcher, "select_candidates", None)
+        selected = (
+            select_candidates(candidates, limit=10)
+            if select_candidates
+            else candidates[:10]
+        )
+        for c in selected:
             _log(f"  [{c.category}] {c.title}  (score {c.score})", "search")
 
-        selected = candidates[:10]
         if selected:
-            _log(f"Downloading top {len(selected)} candidate(s) ...", "download")
+            _log(f"Downloading {len(selected)} selected candidate(s) across file types ...", "download")
         fetch_result = fetcher.fetch_selected(
             selected,
             output_dir,
@@ -472,12 +499,16 @@ class AutoEmuAgentRuntime:
                     )
                 )
                 if agent_result.error:
-                    _log(f"Agent fetch failed: {agent_result.error}", "warn")
+                    agent_error = _sanitize_agent_error(agent_result.error)
+                    _log(f"Agent fetch failed: {agent_error}", "warn")
+                    base_result["agent_error"] = agent_error
                 else:
                     _log("Agent fetch completed", "agent_text")
                     base_result["agent_messages"] = agent_result.agent_messages
             except Exception as exc:
-                _log(f"Agent fetch unavailable: {exc}", "warn")
+                agent_error = _sanitize_agent_error(str(exc))
+                _log(f"Agent fetch unavailable: {agent_error}", "warn")
+                base_result["agent_error"] = agent_error
 
         return base_result
 
@@ -546,12 +577,16 @@ class AutoEmuAgentRuntime:
                     )
                 )
                 if result.error:
-                    _log(f"Agent build failed: {result.error}", "warn")
+                    agent_error = _sanitize_agent_error(result.error)
+                    _log(f"Agent build failed: {agent_error}", "warn")
+                    harness_result["agent_error"] = agent_error
                 else:
                     _log("Agent enhancement completed", "agent_text")
                     harness_result["agent_messages"] = result.agent_messages
             except Exception as exc:
-                _log(f"Agent build unavailable, using harness output: {exc}", "warn")
+                agent_error = _sanitize_agent_error(str(exc))
+                _log(f"Agent build unavailable, using harness output: {agent_error}", "warn")
+                harness_result["agent_error"] = agent_error
 
         return harness_result
 
@@ -592,14 +627,16 @@ class AutoEmuAgentRuntime:
 
         # Check QEMU source availability before logging per-file messages so we
         # don't emit "Compiling: foo.c" lines when nothing will actually be compiled.
-        if not find_qemu_include_paths():
+        qemu_src = self.config.qemu_src or None
+        if not find_qemu_include_paths(qemu_src):
             _log(
                 f"Skipping compilation check ({len(files)} file(s)) — "
-                f"QEMU source tree not found at {QEMU_SOURCE_DIR}",
+                f"QEMU source tree not found ({qemu_source_hint(qemu_src)})",
                 "warn",
             )
             all_warnings = [
-                f"QEMU source tree not found at {QEMU_SOURCE_DIR}; skipping compilation check"
+                f"QEMU source tree not found ({qemu_source_hint(qemu_src)}); "
+                "skipping compilation check"
             ] + extra_warnings
             for w in all_warnings:
                 _log(f"  WARN: {w}", "warn")
@@ -608,11 +645,12 @@ class AutoEmuAgentRuntime:
                 result["success"] = False
             return result
 
-        _log(f"Checking {len(files)} file(s) against QEMU v9.2.4 headers ...", "compile")
+        qemu_label = qemu_src or "auto-discovered QEMU"
+        _log(f"Checking {len(files)} file(s) against {qemu_label} headers ...", "compile")
         for f in files:
             _log(f"  Compiling: {f.name}", "compile")
 
-        compile_result: dict[str, Any] = validate_compile(files)
+        compile_result: dict[str, Any] = validate_compile(files, qemu_src=qemu_src)
         for err in compile_result.get("errors", []):
             fname = Path(err.get("file", "")).name
             stderr_line = err.get("stderr", "").split("\n")[0][:120]
@@ -634,6 +672,37 @@ class AutoEmuAgentRuntime:
             return len(fetch_result["downloaded"])
         artifacts = fetch_result.get("artifacts", [])
         return sum(1 for a in artifacts if a.get("status") in ("downloaded", "cached"))
+
+
+def _phase_agent_errors(*phase_results: dict[str, Any]) -> list[str]:
+    """Return user-visible agent backend failures from phase result dicts."""
+    phase_names = ("fetch", "build")
+    errors: list[str] = []
+    for phase_name, phase_result in zip(phase_names, phase_results):
+        agent_error = str(phase_result.get("agent_error", "")).strip()
+        if agent_error:
+            errors.append(f"{phase_name} agent failed: {agent_error}")
+    return errors
+
+
+def _validation_failure_summary(validation: dict[str, Any]) -> str:
+    """Summarize validation errors or blocking warnings for PipelineResult.error."""
+    errors = validation.get("errors", []) or []
+    if errors:
+        summaries: list[str] = []
+        for err in errors[:3]:
+            if isinstance(err, dict):
+                fname = Path(err.get("file", "")).name or "generated file"
+                stderr = str(err.get("stderr", "")).split("\n")[0].strip()
+                summaries.append(f"{fname}: {stderr}" if stderr else fname)
+            else:
+                summaries.append(str(err))
+        return "validation failed: " + "; ".join(summaries)
+
+    warnings = validation.get("warnings", []) or []
+    if warnings:
+        return "validation failed: " + "; ".join(str(w) for w in warnings[:3])
+    return "validation failed"
 
 
 def _sanitize_agent_error(msg: str) -> str:

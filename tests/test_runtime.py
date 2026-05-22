@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -20,6 +21,7 @@ def isolate_runtime_config(monkeypatch):
     monkeypatch.delenv("AUTOEMU_AGENT_BACKEND", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MODEL", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MAX_BUDGET_USD", raising=False)
+    monkeypatch.delenv("AUTOEMU_QEMU_SRC", raising=False)
     monkeypatch.setattr("autoemu.agent.runtime._load_config_file", lambda: {})
 
 
@@ -106,6 +108,29 @@ def test_runtime_config_environment_overrides_file(monkeypatch):
     assert config.openai_base_url == "https://env.example/v1"
 
 
+def test_runtime_config_loads_validation_qemu_src(monkeypatch):
+    monkeypatch.setattr(
+        "autoemu.agent.runtime._load_config_file",
+        lambda: {"validation": {"qemu_src": "/opt/qemu"}},
+    )
+
+    config = AgentRuntimeConfig.load()
+
+    assert config.qemu_src == "/opt/qemu"
+
+
+def test_runtime_config_qemu_src_environment_overrides_file(monkeypatch):
+    monkeypatch.setattr(
+        "autoemu.agent.runtime._load_config_file",
+        lambda: {"validation": {"qemu_src": "/opt/qemu-from-file"}},
+    )
+    monkeypatch.setenv("AUTOEMU_QEMU_SRC", "latest")
+
+    config = AgentRuntimeConfig.load()
+
+    assert config.qemu_src == "latest"
+
+
 def test_run_pipeline_calls_phases(monkeypatch, tmp_path):
     """Verify the unified pipeline calls fetch, build, validate in order."""
     phases_seen: list[str] = []
@@ -189,6 +214,69 @@ def test_run_pipeline_handles_fetch_error(monkeypatch):
     assert "network down" in result.error
 
 
+def test_run_pipeline_fails_when_validation_fails(monkeypatch):
+    """Validation failure must determine the final pipeline status."""
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "downloaded": [{"file": "driver.c"}]}
+
+    def fake_do_build(self, **kwargs):
+        return {"success": True, "generated_files": ["output/gpu_peripheral.json"]}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {
+            "success": False,
+            "files_checked": 0,
+            "errors": [],
+            "warnings": ["gpu_peripheral.json has base_address=0 - likely incorrect"],
+        }
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+    )
+
+    assert not result.success
+    assert "base_address=0" in result.error
+    assert result.validation_result["success"] is False
+
+
+def test_run_pipeline_falls_back_on_agent_errors_when_harness_valid(monkeypatch):
+    """Configured agent failures should not fail a valid deterministic harness run."""
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "downloaded": [{"file": "driver.c"}]}
+
+    def fake_do_build(self, **kwargs):
+        return {
+            "success": True,
+            "generated_files": ["output/hikey960_gpu.c"],
+            "agent_error": "codex-app-server-sdk is not installed",
+        }
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime.run_pipeline(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+    )
+
+    assert result.success
+    assert result.generated_files == ["output/hikey960_gpu.c"]
+    assert result.error == ""
+
+
 def test_run_pipeline_generic_platform_detection(monkeypatch):
     """Non-STM32 targets get 'generic' platform and per-MCU data dir."""
     captured: dict = {}
@@ -249,3 +337,103 @@ def test_run_pipeline_per_mcu_data_dirs(monkeypatch):
     runtime.run_pipeline(target_mcu="STM32F407VG", target_peripheral="ETH")
     assert dirs[-2] == "data/stm32f407vg"  # fetch
     assert dirs[-1] == "data/stm32f407vg"  # build
+
+
+def test_do_fetch_records_agent_fetch_error(monkeypatch, tmp_path):
+    """Agent fetch failures should be returned to the caller."""
+
+    class FakeFetcher:
+        def discover_candidates(self, target_mcu, target_peripheral):
+            return []
+
+        def fetch_selected(self, selected, output_dir, *, target_mcu, target_peripheral):
+            return SimpleNamespace(downloaded=[], errors=[])
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            pass
+
+        async def fetch_input_data(self, task, on_event=None):
+            return SimpleNamespace(
+                error="codex-app-server-sdk is not installed",
+                agent_messages=[],
+            )
+
+    monkeypatch.setattr("autoemu.agent.runtime.GenericDataFetcher", FakeFetcher)
+    monkeypatch.setattr("autoemu.agent.runtime.AutoEmuOrchestrator", FakeOrchestrator)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._do_fetch(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        platform_name="generic",
+        output_dir=str(tmp_path),
+    )
+
+    assert result["agent_error"] == "codex-app-server-sdk is not installed"
+
+
+def test_do_build_records_agent_build_error_without_discarding_harness_output(monkeypatch, tmp_path):
+    """Agent build failures should be explicit while preserving harness artifacts."""
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            pass
+
+        async def model_peripheral(self, task, on_event=None):
+            return SimpleNamespace(
+                error="codex-app-server-sdk is not installed",
+                agent_messages=[],
+            )
+
+    def fake_run_target_model_pipeline(**kwargs):
+        return {
+            "success": True,
+            "generated_files": ["output/hikey960_gpu.c"],
+        }
+
+    def fake_resolve_fetched_input_bundle(**kwargs):
+        return SimpleNamespace(svd_path="", header_path="", driver_paths=())
+
+    monkeypatch.setattr("autoemu.agent.runtime.AutoEmuOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr("autoemu.agent.runtime.run_target_model_pipeline", fake_run_target_model_pipeline)
+    monkeypatch.setattr("autoemu.agent.runtime.resolve_fetched_input_bundle", fake_resolve_fetched_input_bundle)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._do_build(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        platform_name="generic",
+        data_dir=str(tmp_path),
+        output_dir=str(tmp_path / "output"),
+    )
+
+    assert result["generated_files"] == ["output/hikey960_gpu.c"]
+    assert result["agent_error"] == "codex-app-server-sdk is not installed"
+
+
+def test_do_validate_uses_configured_qemu_source(monkeypatch, tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "demo.c").write_text("int demo(void) { return 0; }\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_find_qemu_include_paths(qemu_src=None):
+        captured["find_qemu_src"] = qemu_src
+        return [str(tmp_path / "qemu" / "include")]
+
+    def fake_validate_compile(files, *, qemu_src=None):
+        captured["validate_qemu_src"] = qemu_src
+        captured["files"] = [str(f) for f in files]
+        return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
+
+    monkeypatch.setattr("autoemu.agent.runtime.find_qemu_include_paths", fake_find_qemu_include_paths)
+    monkeypatch.setattr("autoemu.agent.runtime.validate_compile", fake_validate_compile)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(qemu_src="/opt/qemu"))
+    result = runtime._do_validate(str(output_dir))
+
+    assert result["success"] is True
+    assert captured["find_qemu_src"] == "/opt/qemu"
+    assert captured["validate_qemu_src"] == "/opt/qemu"
+    assert captured["files"] == [str(output_dir / "demo.c")]

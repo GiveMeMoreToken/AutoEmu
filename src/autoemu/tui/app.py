@@ -432,7 +432,7 @@ class AutoEmuApp(App):
                     for err in errors[:10]:
                         log.write(f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]")
                 else:
-                    log.log_kind(f"Validation: {checked} file(s) checked, warnings only", "warn")
+                    log.log_error(f"Validation: {checked} file(s) checked, blocking warning(s)")
                 for w in warnings:
                     log.write(f"  [yellow]Warning: {w}[/]")
 

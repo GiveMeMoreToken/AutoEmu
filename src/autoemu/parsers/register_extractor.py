@@ -35,6 +35,12 @@ def extract_register_blocks(
     warnings.extend(svd_warnings)
 
     header_blocks = parse_header_file(header_path) if header_path else {}
+    if header_path and peripheral_name:
+        requested_header_blocks = parse_header_file(header_path, peripheral_name)
+        for name, block in requested_header_blocks.items():
+            existing = header_blocks.get(name)
+            if existing is None or len(block.registers) > len(existing.registers):
+                header_blocks[name] = block
 
     if peripheral_name:
         names = _resolve_peripheral_names(

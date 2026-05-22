@@ -6,6 +6,7 @@ and bit-field macro definitions from STM32 CMSIS headers.
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 from dataclasses import dataclass, field
@@ -199,6 +200,15 @@ _RE_POS_DEF = re.compile(
 _RE_MSK_DEF = re.compile(
     r"#define\s+(\w+)_(\w+)_(\w+)_Msk\s+\(0x([0-9A-Fa-f]+)U?\s*<<\s*(\w+)_\w+_\w+_Pos\)"
 )
+_RE_DEFINE_ANY = re.compile(
+    r"^\s*#define\s+(?P<name>[A-Z][A-Z0-9_]*)"
+    r"(?:\((?P<params>[A-Za-z0-9_,\s]*)\))?\s+"
+    r"(?P<expr>.+?)\s*$"
+)
+_RE_INLINE_COMMENT = re.compile(r"/\*(?P<comment>.*?)\*/")
+_RE_C_INT_SUFFIX = re.compile(r"(?<=\d)[uUlL]+\b")
+_RE_IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_RE_FUNC_CALL = re.compile(r"\b([A-Z][A-Z0-9_]*)\s*\(([^()]*)\)")
 
 _TYPE_SIZES = {
     "uint8_t": 1,
@@ -208,6 +218,26 @@ _TYPE_SIZES = {
     "int16_t": 2,
     "int32_t": 4,
 }
+_MACRO_INDEX_EXPANSION_COUNT = 16
+_MACRO_MAX_REGISTER_OFFSET = 0x10000
+
+
+@dataclass(frozen=True)
+class _DefineMacro:
+    name: str
+    params: tuple[str, ...]
+    expr: str
+    description: str = ""
+    order: int = 0
+
+
+@dataclass(frozen=True)
+class _MacroRegisterCandidate:
+    name: str
+    offset: int
+    description: str
+    access: AccessType
+    order: int
 
 
 def parse_macros(content: str) -> list[MacroDef]:
@@ -245,9 +275,9 @@ def _infer_access_from_description(description: str, default: AccessType) -> Acc
         return AccessType.W1S
     if "write 0 to clear" in text or "cleared by writing 0" in text:
         return AccessType.W0C
-    if "read only" in text:
+    if "read only" in text or "(ro)" in text:
         return AccessType.RO
-    if "write only" in text:
+    if "write only" in text or "(wo)" in text:
         return AccessType.WO
     return default
 
@@ -466,6 +496,395 @@ def _define_based_register_blocks(
     return results
 
 
+def _macro_only_register_blocks(
+    content: str,
+    peripheral_name: str | None = None,
+) -> dict[str, RegisterBlock]:
+    """Fallback: create a block from Linux-style ``#define REG 0xOFF`` maps."""
+    macros = _parse_define_macros(content)
+    if not macros:
+        return {}
+
+    function_macros = {macro.name: macro for macro in macros if macro.params}
+    helper_function_names = _find_helper_function_macros(function_macros)
+    symbols = _resolve_numeric_symbols(macros, function_macros)
+    direct_candidates = _direct_macro_register_candidates(macros, symbols)
+    function_candidates = _indexed_macro_register_candidates(
+        function_macros,
+        helper_function_names,
+        symbols,
+        direct_candidates,
+    )
+    candidates = _filter_value_macros(direct_candidates + function_candidates)
+    candidates = _dedupe_register_candidates(candidates)
+
+    if not candidates:
+        return {}
+
+    if peripheral_name:
+        requested = _normalize_macro_token(peripheral_name)
+        has_requested_prefix = any(
+            _normalize_macro_token(candidate.name).startswith(f"{requested}_")
+            or _normalize_macro_token(candidate.name) == requested
+            for candidate in candidates
+        )
+        if not has_requested_prefix:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if requested in _normalize_macro_token(candidate.name)
+            ]
+        if not candidates:
+            return {}
+        return {
+            peripheral_name: RegisterBlock(
+                name=peripheral_name,
+                registers=_macro_candidates_to_registers(candidates),
+            )
+        }
+
+    grouped: dict[str, list[_MacroRegisterCandidate]] = {}
+    for candidate in candidates:
+        prefix = candidate.name.split("_", 1)[0]
+        grouped.setdefault(prefix, []).append(candidate)
+    return {
+        prefix: RegisterBlock(
+            name=prefix,
+            registers=_macro_candidates_to_registers(items),
+        )
+        for prefix, items in grouped.items()
+    }
+
+
+def _parse_define_macros(content: str) -> list[_DefineMacro]:
+    macros: list[_DefineMacro] = []
+    for order, line in enumerate(content.splitlines()):
+        if line.rstrip().endswith("\\"):
+            continue
+        comment_match = _RE_INLINE_COMMENT.search(line)
+        description = _strip_comment_markers(comment_match.group(0)) if comment_match else ""
+        line_without_comment = _RE_INLINE_COMMENT.sub("", line)
+        match = _RE_DEFINE_ANY.match(line_without_comment)
+        if not match:
+            continue
+        params = tuple(
+            param.strip()
+            for param in (match.group("params") or "").split(",")
+            if param.strip()
+        )
+        macros.append(_DefineMacro(
+            name=match.group("name"),
+            params=params,
+            expr=match.group("expr").strip(),
+            description=description,
+            order=order,
+        ))
+    return macros
+
+
+def _resolve_numeric_symbols(
+    macros: list[_DefineMacro],
+    function_macros: dict[str, _DefineMacro],
+) -> dict[str, int]:
+    symbols: dict[str, int] = {}
+    plain_macros = [macro for macro in macros if not macro.params]
+    for _ in range(len(plain_macros) + 1):
+        changed = False
+        for macro in plain_macros:
+            if macro.name in symbols:
+                continue
+            value = _evaluate_offset_expr(macro.expr, symbols, function_macros)
+            if value is None:
+                continue
+            symbols[macro.name] = value
+            changed = True
+        if not changed:
+            break
+    return symbols
+
+
+def _direct_macro_register_candidates(
+    macros: list[_DefineMacro],
+    symbols: dict[str, int],
+) -> list[_MacroRegisterCandidate]:
+    candidates: list[_MacroRegisterCandidate] = []
+    for macro in macros:
+        if macro.params or _is_obvious_non_register_macro(macro.name):
+            continue
+        if not _direct_expr_looks_like_register_offset(macro.expr):
+            continue
+        offset = symbols.get(macro.name)
+        if offset is None or not _looks_like_register_offset(offset):
+            continue
+        candidates.append(_MacroRegisterCandidate(
+            name=macro.name,
+            offset=offset,
+            description=macro.description,
+            access=_infer_access_from_description(macro.description, AccessType.RW),
+            order=macro.order,
+        ))
+    return candidates
+
+
+def _indexed_macro_register_candidates(
+    function_macros: dict[str, _DefineMacro],
+    helper_function_names: set[str],
+    symbols: dict[str, int],
+    direct_candidates: list[_MacroRegisterCandidate],
+) -> list[_MacroRegisterCandidate]:
+    candidates: list[_MacroRegisterCandidate] = []
+    direct_names = {candidate.name for candidate in direct_candidates}
+    for macro in function_macros.values():
+        if len(macro.params) != 1:
+            continue
+        if macro.name in helper_function_names:
+            continue
+        if _is_obvious_non_register_macro(macro.name):
+            continue
+        if not _function_expr_looks_like_register_offset(macro.expr):
+            continue
+        if _has_shorter_register_prefix(macro.name, direct_names):
+            continue
+        param = macro.params[0]
+        for index in range(_MACRO_INDEX_EXPANSION_COUNT):
+            offset = _evaluate_offset_expr(
+                macro.expr,
+                symbols,
+                function_macros,
+                args={param: index},
+            )
+            if offset is None or not _looks_like_register_offset(offset):
+                continue
+            candidates.append(_MacroRegisterCandidate(
+                name=f"{macro.name}_{index}",
+                offset=offset,
+                description=macro.description,
+                access=_infer_access_from_description(macro.description, AccessType.RW),
+                order=macro.order * _MACRO_INDEX_EXPANSION_COUNT + index,
+            ))
+    return candidates
+
+
+def _find_helper_function_macros(function_macros: dict[str, _DefineMacro]) -> set[str]:
+    helpers: set[str] = set()
+    for macro in function_macros.values():
+        for match in _RE_FUNC_CALL.finditer(macro.expr):
+            name = match.group(1)
+            if name in function_macros and name != macro.name:
+                helpers.add(name)
+    return helpers
+
+
+def _filter_value_macros(
+    candidates: list[_MacroRegisterCandidate],
+) -> list[_MacroRegisterCandidate]:
+    names = {candidate.name for candidate in candidates}
+    names.update(
+        re.sub(r"_\d+$", "", candidate.name)
+        for candidate in candidates
+        if re.search(r"_\d+$", candidate.name)
+    )
+    filtered: list[_MacroRegisterCandidate] = []
+    for candidate in candidates:
+        prefix_names = set(names)
+        indexed_base = re.sub(r"_\d+$", "", candidate.name)
+        if indexed_base != candidate.name:
+            prefix_names.discard(indexed_base)
+        if _has_shorter_register_prefix(candidate.name, prefix_names):
+            continue
+        filtered.append(candidate)
+    return filtered
+
+
+def _dedupe_register_candidates(
+    candidates: list[_MacroRegisterCandidate],
+) -> list[_MacroRegisterCandidate]:
+    ordered = sorted(candidates, key=lambda item: (item.offset, item.order, item.name))
+    seen_offsets: set[int] = set()
+    seen_names: set[str] = set()
+    deduped: list[_MacroRegisterCandidate] = []
+    for candidate in ordered:
+        if candidate.offset in seen_offsets or candidate.name in seen_names:
+            continue
+        seen_offsets.add(candidate.offset)
+        seen_names.add(candidate.name)
+        deduped.append(candidate)
+    return deduped
+
+
+def _macro_candidates_to_registers(
+    candidates: list[_MacroRegisterCandidate],
+) -> list[Register]:
+    return [
+        Register(
+            name=candidate.name,
+            offset=candidate.offset,
+            size=32,
+            description=candidate.description,
+            access=candidate.access,
+            reset_value=0,
+            fields=[],
+        )
+        for candidate in sorted(candidates, key=lambda item: (item.offset, item.name))
+    ]
+
+
+def _evaluate_offset_expr(
+    expr: str,
+    symbols: dict[str, int],
+    function_macros: dict[str, _DefineMacro],
+    *,
+    args: dict[str, int] | None = None,
+    depth: int = 0,
+) -> int | None:
+    if depth > 8:
+        return None
+    normalized = _normalize_c_integer_expr(expr)
+    args = args or {}
+    for name, value in args.items():
+        normalized = re.sub(rf"\b{re.escape(name)}\b", str(value), normalized)
+
+    for _ in range(12):
+        previous = normalized
+        normalized = _replace_function_calls(
+            normalized,
+            symbols,
+            function_macros,
+            depth=depth,
+        )
+        normalized = _replace_numeric_symbols(normalized, symbols)
+        if normalized == previous:
+            break
+
+    without_hex = re.sub(r"0[xX][0-9a-fA-F]+", "0", normalized)
+    if _RE_IDENTIFIER.search(without_hex):
+        return None
+    try:
+        value = _safe_eval_int(normalized)
+    except Exception:
+        return None
+    return value if value >= 0 else None
+
+
+def _replace_function_calls(
+    expr: str,
+    symbols: dict[str, int],
+    function_macros: dict[str, _DefineMacro],
+    *,
+    depth: int,
+) -> str:
+    def repl(match: re.Match[str]) -> str:
+        macro = function_macros.get(match.group(1))
+        if macro is None:
+            return match.group(0)
+        arg_exprs = _split_macro_args(match.group(2))
+        if len(arg_exprs) != len(macro.params):
+            return match.group(0)
+        arg_values = [
+            _evaluate_offset_expr(arg_expr, symbols, function_macros, depth=depth + 1)
+            for arg_expr in arg_exprs
+        ]
+        if any(value is None for value in arg_values):
+            return match.group(0)
+        local_args = dict(zip(macro.params, [int(value) for value in arg_values if value is not None]))
+        value = _evaluate_offset_expr(
+            macro.expr,
+            symbols,
+            function_macros,
+            args=local_args,
+            depth=depth + 1,
+        )
+        return str(value) if value is not None else match.group(0)
+
+    return _RE_FUNC_CALL.sub(repl, expr)
+
+
+def _replace_numeric_symbols(expr: str, symbols: dict[str, int]) -> str:
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(0)
+        if name in symbols:
+            return str(symbols[name])
+        return name
+
+    return _RE_IDENTIFIER.sub(repl, expr)
+
+
+def _split_macro_args(text: str) -> list[str]:
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+def _normalize_c_integer_expr(expr: str) -> str:
+    normalized = expr.strip()
+    normalized = _RE_C_INT_SUFFIX.sub("", normalized)
+    normalized = normalized.replace("ULL", "").replace("UL", "").replace("LL", "")
+    return normalized
+
+
+def _safe_eval_int(expr: str) -> int:
+    tree = ast.parse(expr, mode="eval")
+    _validate_int_expr_ast(tree)
+    value = eval(compile(tree, "<macro-expr>", "eval"), {"__builtins__": {}}, {})
+    if not isinstance(value, int):
+        raise ValueError("expression did not evaluate to int")
+    return value
+
+
+def _validate_int_expr_ast(node: ast.AST) -> None:
+    allowed = (
+        ast.Expression,
+        ast.Constant,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.FloorDiv,
+        ast.Mod,
+        ast.LShift,
+        ast.RShift,
+        ast.BitOr,
+        ast.BitAnd,
+        ast.BitXor,
+        ast.Invert,
+        ast.UAdd,
+        ast.USub,
+    )
+    for child in ast.walk(node):
+        if not isinstance(child, allowed):
+            raise ValueError(f"unsupported expression node: {type(child).__name__}")
+        if isinstance(child, ast.Constant) and not isinstance(child.value, int):
+            raise ValueError("non-integer constant")
+
+
+def _is_obvious_non_register_macro(name: str) -> bool:
+    return name.endswith(("_BASE", "_SHIFT", "_STRIDE", "_SIZE"))
+
+
+def _function_expr_looks_like_register_offset(expr: str) -> bool:
+    return "+" in expr
+
+
+def _direct_expr_looks_like_register_offset(expr: str) -> bool:
+    return "<<" not in expr and "BIT(" not in expr and "GENMASK" not in expr
+
+
+def _looks_like_register_offset(value: int) -> bool:
+    return value % 4 == 0 and 0 <= value <= _MACRO_MAX_REGISTER_OFFSET
+
+
+def _has_shorter_register_prefix(name: str, register_names: set[str]) -> bool:
+    parts = name.split("_")
+    for end in range(len(parts) - 1, 0, -1):
+        prefix = "_".join(parts[:end])
+        if prefix in register_names and prefix != name:
+            return True
+    return False
+
+
+def _normalize_macro_token(value: str) -> str:
+    return re.sub(r"[^A-Z0-9_]+", "", value.upper())
+
+
 def parse_header_file(
     path: str | Path,
     peripheral_name: str | None = None,
@@ -512,6 +931,8 @@ def parse_header_file(
         # try #define-based register extraction.
         if not results:
             results = _define_based_register_blocks(content, base_addrs, peripheral_name)
+        if not results:
+            results = _macro_only_register_blocks(content, peripheral_name)
 
         return results
     except Exception as exc:

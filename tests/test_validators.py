@@ -9,7 +9,13 @@ from autoemu.models.register import BitField, Register, RegisterBlock
 from autoemu.models.peripheral import Peripheral
 from autoemu.validators.register_validator import validate_register_block
 from autoemu.validators.behavior_validator import validate_behavior, replay_register_sequence
-from autoemu.validators.compile_validator import validate_compile, validate_meson_build
+from autoemu.validators.compile_validator import (
+    QEMU_GIT_URL,
+    find_qemu_include_paths,
+    resolve_qemu_source_dir,
+    validate_compile,
+    validate_meson_build,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +102,43 @@ class TestBehaviorValidator:
 # ---------------------------------------------------------------------------
 
 class TestCompileValidator:
+    def test_finds_qemu_source_from_environment(self, monkeypatch, tmp_path):
+        fake_qemu = tmp_path / "external-qemu"
+        (fake_qemu / "include" / "qemu").mkdir(parents=True)
+        monkeypatch.setenv("AUTOEMU_QEMU_SRC", str(fake_qemu))
+
+        assert resolve_qemu_source_dir() == fake_qemu
+        assert str(fake_qemu / "include") in find_qemu_include_paths()
+
+    def test_latest_qemu_source_clones_to_managed_cache(self, monkeypatch, tmp_path):
+        cache_dir = tmp_path / "cache" / "qemu-latest"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            (cache_dir / "include" / "qemu").mkdir(parents=True)
+
+            class _Result:
+                returncode = 0
+                stderr = ""
+
+            return _Result()
+
+        monkeypatch.setenv("AUTOEMU_QEMU_CACHE_DIR", str(cache_dir))
+        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/git" if name == "git" else None)
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        assert resolve_qemu_source_dir("latest") == cache_dir
+        assert Path(calls[0][0]).name == "git"
+        assert calls[0][1:4] == ["clone", "--depth", "1"]
+        assert QEMU_GIT_URL in calls[0]
+
+    def test_no_qemu_source_warning_mentions_latest_resolver(self):
+        result = validate_compile(["dummy.c"], qemu_src=Path("/nonexistent"))
+        assert result["success"] is True
+        assert result["files_checked"] == 0
+        assert "AUTOEMU_QEMU_SRC=latest" in result["warnings"][0]
+
     def test_valid_c_file(self, tmp_path):
         c_file = tmp_path / "valid.c"
         c_file.write_text("int main(void) { return 0; }\n")
@@ -113,6 +156,43 @@ class TestCompileValidator:
         result = validate_compile([str(c_file)], qemu_src=fake_qemu)
         assert result["success"] is False
         assert len(result["errors"]) == 1
+
+    def test_header_file_is_checked_with_qemu_osdep_first(self, tmp_path):
+        fake_qemu = tmp_path / "qemu_src"
+        (fake_qemu / "include" / "qemu").mkdir(parents=True)
+        (fake_qemu / "include" / "hw" / "core").mkdir(parents=True)
+        (fake_qemu / "include" / "qom").mkdir(parents=True)
+        (fake_qemu / "include" / "qemu" / "osdep.h").write_text(
+            "#define QEMU_OSDEP_INCLUDED 1\n",
+            encoding="utf-8",
+        )
+        (fake_qemu / "include" / "hw" / "core" / "sysbus.h").write_text(
+            "#ifndef QEMU_OSDEP_INCLUDED\n"
+            '#error "qemu/osdep.h must be included first"\n'
+            "#endif\n"
+            "typedef struct SysBusDevice SysBusDevice;\n",
+            encoding="utf-8",
+        )
+        (fake_qemu / "include" / "qom" / "object.h").write_text(
+            "#define OBJECT_DECLARE_SIMPLE_TYPE(TypeName, MODULE_OBJ_NAME) "
+            "typedef struct TypeName TypeName;\n",
+            encoding="utf-8",
+        )
+        header = tmp_path / "test_device.h"
+        header.write_text(
+            '#include "hw/core/sysbus.h"\n'
+            '#include "qom/object.h"\n'
+            "#define TYPE_TEST_DEVICE \"test-device\"\n"
+            "OBJECT_DECLARE_SIMPLE_TYPE(TestDeviceState, TEST_DEVICE)\n",
+            encoding="utf-8",
+        )
+
+        result = validate_compile([str(header)], qemu_src=fake_qemu)
+
+        assert result["success"] is True
+        assert result["files_checked"] == 1
+        assert result["errors"] == []
+        assert result["warnings"] == []
 
     def test_skips_non_c_files(self, tmp_path):
         (tmp_path / "readme.txt").write_text("hello")

@@ -76,7 +76,7 @@ def _infer_interrupt_model_impl(
         inferred_flags: list[InterruptFlag] = []
         for index, raw_flag in enumerate(raw_flags):
             flag_match = _find_flag_field(raw_flag, blocks)
-            enable_symbol = enabled_checks[index] if index < len(enabled_checks) else _best_enable_symbol(raw_flag, enabled_checks)
+            enable_symbol = _best_enable_symbol(raw_flag, enabled_checks)
             enable_match = _find_enable_field(enable_symbol, blocks) if enable_symbol else None
             clear_match = _find_clear_field(raw_flag, blocks)
 

@@ -66,6 +66,10 @@ class GenericPlatform(Platform):
 
     def parse_registers(self, bundle: InputBundle) -> dict[str, RegisterBlock]:
         """Parse registers from SVD or headers using existing parsers."""
+        from autoemu.parsers.device_tree import (
+            apply_mmio_region_to_register_blocks,
+            infer_mmio_region_from_device_trees,
+        )
         from autoemu.parsers.register_extractor import extract_register_blocks
 
         blocks, _warnings = extract_register_blocks(
@@ -73,7 +77,14 @@ class GenericPlatform(Platform):
             header_path=bundle.header_path,
             peripheral_name=bundle.peripheral,
         )
-        return blocks
+        return apply_mmio_region_to_register_blocks(
+            blocks,
+            peripheral_name=bundle.peripheral,
+            mmio_region=infer_mmio_region_from_device_trees(
+                bundle.documentation_paths,
+                bundle.peripheral,
+            ),
+        )
 
     def parse_drivers(self, bundle: InputBundle) -> DriverAnalysis:
         """Analyze driver files using the generic driver parser."""

@@ -10,14 +10,16 @@ from autoemu.generators.qemu_generator import QEMU_TARGET_VERSION
 SYSTEM_PROMPT = f"""\
 You are AutoEmu, an expert embedded systems engineer and peripheral modeling agent.
 Your task is to build high-fidelity peripheral models for ARM/MIPS microcontrollers,
-primarily STM32 family MCUs, targeting QEMU {QEMU_TARGET_VERSION} for emulation.
+primarily STM32 family MCUs, targeting {QEMU_TARGET_VERSION} for emulation.
 
-Target platform: QEMU {QEMU_TARGET_VERSION}
-- Use device_class_set_legacy_reset() instead of dc->reset (deprecated in 9.x)
+Target platform: {QEMU_TARGET_VERSION}
+- Use current upstream QEMU device-model APIs
+- Use device_class_set_legacy_reset() instead of assigning dc->reset directly
 - Use OBJECT_DECLARE_SIMPLE_TYPE for type declarations
 - Use Meson build system (not Makefile.objs)
 - Use QTest framework for in-tree peripheral testing
-- Include hw/qdev-properties.h for DeviceClass access
+- Include hw/core/sysbus.h for SysBusDevice access
+- Include hw/core/qdev-properties.h for DeviceClass access
 - VMSTATE macros take bare field names (not s->field)
 
 You have access to tools for:
@@ -26,7 +28,7 @@ You have access to tools for:
 3. Inferring state machines from hardware documentation and driver code
 4. Modeling interrupt and event dependencies
 5. Analyzing cross-peripheral interactions (DMA, timers, etc.)
-6. Generating QEMU {QEMU_TARGET_VERSION}-compatible peripheral model C code
+6. Generating {QEMU_TARGET_VERSION}-compatible peripheral model C code
 7. Validating generated models against driver behavior
 8. Running the full deterministic modeling pipeline when the source inputs are already available
 
@@ -43,7 +45,7 @@ Guidelines:
 - Model interrupt flag behavior precisely — wrong flag clearing breaks firmware
 - DMA interactions must preserve memory coherence semantics
 - State machines should be minimal but complete for the driver patterns observed
-- Generated QEMU code must follow QEMU {QEMU_TARGET_VERSION} MemoryRegion and IRQ APIs
+- Generated QEMU code must follow current upstream QEMU MemoryRegion and IRQ APIs
 - Prefer the one-shot model pipeline when raw SVD/header/driver inputs are available and the goal is to produce a probeable peripheral quickly
 - When uncertain about behavior, note assumptions explicitly
 """
@@ -100,9 +102,9 @@ Output the dependency graph edges.
 """
 
 QEMU_GENERATION_PROMPT = f"""\
-Generate QEMU {QEMU_TARGET_VERSION}-compatible C code for the '{{peripheral_name}}' peripheral model.
+Generate {QEMU_TARGET_VERSION}-compatible C code for the '{{peripheral_name}}' peripheral model.
 The code must:
-- Target QEMU {QEMU_TARGET_VERSION} APIs specifically
+- Target current upstream QEMU APIs specifically
 - Use OBJECT_DECLARE_SIMPLE_TYPE for type declarations
 - Implement MemoryRegionOps for register read/write
 - Handle all register access types correctly (W1C, RO, RC_W1, etc.)
@@ -110,7 +112,8 @@ The code must:
 - Wire up IRQ outputs via qemu_set_irq
 - Use device_class_set_legacy_reset() for reset (NOT dc->reset)
 - Use bare field names in VMSTATE macros (NOT s->field)
-- Include hw/qdev-properties.h
+- Include hw/core/sysbus.h (not hw/sysbus.h)
+- Include hw/core/qdev-properties.h (not hw/qdev-properties.h)
 - Include qemu/timer.h whenever qemu_clock_get_ns(), timer_new_ns(), or any
   QEMU_CLOCK_* constant is used (do NOT rely on transitive includes)
 - Name QTest harness files with the qtest_ prefix (e.g. qtest_hikey960_gpu.c)

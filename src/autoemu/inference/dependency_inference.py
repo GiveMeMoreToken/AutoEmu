@@ -70,7 +70,7 @@ def _infer_dependency_graph_impl(
     )
     interrupt = _normalize_interrupt_model(interrupt_model)
     relevant_docs = _filter_relevant_documentation(documentation_text, periph)
-    docs_corpus = relevant_docs if len(relevant_docs.splitlines()) <= 20 and not (source_texts or []) else ""
+    docs_corpus = relevant_docs if not source_texts or len(relevant_docs.splitlines()) <= 20 else ""
     corpus = "\n".join(source_texts or [])
     if docs_corpus:
         corpus = f"{corpus}\n{docs_corpus}" if corpus else docs_corpus

@@ -81,6 +81,7 @@ def merge_register_blocks(
         return RegisterBlock(name=peripheral_name)
 
     base_address = min(block.base_address for block in blocks.values())
+    address_size = _merge_address_size(blocks, base_address)
     registers: list[Register] = []
     for block_name, block in blocks.items():
         for reg in block.registers:
@@ -94,6 +95,7 @@ def merge_register_blocks(
         name=peripheral_name,
         description=description,
         base_address=base_address,
+        address_size=address_size,
         registers=registers,
     )
 
@@ -361,10 +363,26 @@ def _derive_clock_config(dependencies: DependencyGraph | None) -> ClockConfig:
 
 
 def _infer_address_size(register_block: RegisterBlock) -> int:
+    if register_block.address_size:
+        return register_block.address_size
     if not register_block.registers:
         return 0
     last_register = max(register_block.registers, key=lambda reg: reg.offset + (reg.size // 8))
     return last_register.offset + (last_register.size // 8)
+
+
+def _merge_address_size(
+    blocks: dict[str, RegisterBlock],
+    base_address: int,
+) -> int:
+    region_ends = [
+        block.base_address + block.address_size
+        for block in blocks.values()
+        if block.address_size
+    ]
+    if not region_ends:
+        return 0
+    return max(region_ends) - base_address
 
 
 def _resolve_value_expr(register: Register, expr: str) -> int | None:

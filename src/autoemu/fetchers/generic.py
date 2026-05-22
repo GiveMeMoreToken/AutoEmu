@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -10,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from lxml import html
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = "AutoEmu/0.1"
 _DOWNLOAD_TIMEOUT = 10
 _OK_STATUSES = {"downloaded", "cached"}
+_DOC_GLOBS = ("*.txt", "*.pdf", "*.md", "*.html", "*.htm", "*.dts", "*.dtsi")
+_DEVICE_TREE_EXTS = {".dts", ".dtsi"}
 
 
 def _urlopen_with_retry(
@@ -180,7 +183,28 @@ def _normalize_download_url(url: str) -> str:
             owner, repo, _raw, branch = parts[:4]
             tail = "/".join(parts[4:])
             normalized = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{tail}"
+    elif _is_gitiles_url(parsed):
+        query = parse_qs(parsed.query)
+        query["format"] = ["TEXT"]
+        normalized = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     return _sanitize_url(normalized)
+
+
+def _is_gitiles_url(parsed) -> bool:
+    """Return True for Gitiles blob URLs such as android.googlesource.com/.../+/."""
+    return parsed.netloc.endswith("googlesource.com") and "/+/" in parsed.path
+
+
+def _decode_gitiles_text_blob(download_url: str, data: bytes) -> bytes:
+    parsed = urlparse(download_url)
+    query = parse_qs(parsed.query)
+    if not (_is_gitiles_url(parsed) and query.get("format") == ["TEXT"]):
+        return data
+    try:
+        decoded = base64.b64decode(data.strip())
+    except Exception:
+        return data
+    return decoded or data
 
 
 def resolve_fetched_input_bundle(
@@ -228,7 +252,7 @@ def resolve_fetched_input_bundle(
     else:
         # Try STM32-style layout: <data_dir>/<target_slug>/{svd,headers,drivers,...}
         target_root = output_root / _target_slug(target_mcu)
-        docs = [str(path) for path in sorted((target_root / "docs").glob("*.txt")) if path.is_file()]
+        docs = _collect_doc_paths(target_root / "docs")
         svds = [str(path) for path in sorted((target_root / "svd").glob("*.svd")) if path.is_file()]
         headers = [str(path) for path in sorted((target_root / "headers").glob("*.h")) if path.is_file()]
         drivers = [
@@ -248,6 +272,11 @@ def resolve_fetched_input_bundle(
                 ("drivers", "*.c", drivers),
                 ("docs", "*.txt", docs),
                 ("docs", "*.pdf", docs),
+                ("docs", "*.md", docs),
+                ("docs", "*.html", docs),
+                ("docs", "*.htm", docs),
+                ("docs", "*.dts", docs),
+                ("docs", "*.dtsi", docs),
             ]:
                 candidate_dir = output_root / scan_dir
                 if candidate_dir.is_dir():
@@ -260,10 +289,56 @@ def resolve_fetched_input_bundle(
         target_peripheral=target_peripheral,
         manifest_path=str(manifest_path),
         svd_path=svds[0] if svds else "",
-        header_path=headers[0] if headers else "",
+        header_path=_select_best_header(headers, target_peripheral),
         driver_paths=tuple(drivers),
         documentation_paths=tuple(docs),
     )
+
+
+def _collect_doc_paths(directory: Path) -> list[str]:
+    docs: list[str] = []
+    if not directory.is_dir():
+        return docs
+    for pattern in _DOC_GLOBS:
+        docs.extend(str(path) for path in sorted(directory.glob(pattern)) if path.is_file())
+    return docs
+
+
+def _select_best_header(headers: list[str], target_peripheral: str) -> str:
+    if not headers:
+        return ""
+    if len(headers) == 1:
+        return headers[0]
+    return sorted(
+        headers,
+        key=lambda path: (-_score_header_for_peripheral(path, target_peripheral), path),
+    )[0]
+
+
+def _score_header_for_peripheral(path: str, target_peripheral: str) -> int:
+    peripheral = normalize_target_peripheral(target_peripheral)
+    if not peripheral:
+        return 0
+    candidate = Path(path)
+    score = 0
+    if peripheral.lower() in candidate.name.lower():
+        score += 50
+    try:
+        content = candidate.read_text(encoding="utf-8", errors="replace")[:262_144]
+    except Exception:
+        return score
+    upper = content.upper()
+    if re.search(rf"^\s*#\s*DEFINE\s+{re.escape(peripheral)}(?:_|$)", upper, re.MULTILINE):
+        score += 120
+    if re.search(rf"\b{re.escape(peripheral)}_TYPEDEF\b", upper):
+        score += 100
+    if re.search(rf"\b{re.escape(peripheral)}[A-Z0-9]*_BASE\b", upper):
+        score += 80
+    if f"{peripheral}_" in upper:
+        score += 30
+    elif peripheral in upper:
+        score += 5
+    return score
 
 
 @dataclass
@@ -275,6 +350,37 @@ class SearchCandidate:
     category: str  # svd, header, docs, driver
     score: int  # relevance 0-100
     description: str
+
+
+def _is_device_tree_candidate(candidate: SearchCandidate) -> bool:
+    text = f"{candidate.title} {candidate.url} {candidate.description}".lower()
+    path = urlparse(candidate.url).path.lower()
+    return (
+        candidate.category == "docs"
+        and (
+            Path(path).suffix in _DEVICE_TREE_EXTS
+            or "device tree" in text
+            or "device-tree" in text
+            or "dts" in text
+            or "dtsi" in text
+        )
+    )
+
+
+def _candidate_file_type(candidate: SearchCandidate) -> str:
+    path = urlparse(candidate.url).path.lower()
+    suffix = Path(path).suffix
+    if suffix in _DEVICE_TREE_EXTS or _is_device_tree_candidate(candidate):
+        return "device_tree"
+    if suffix in {".c", ".cc", ".cpp"} or candidate.category.startswith("driver"):
+        return "driver"
+    if suffix == ".h" or candidate.category in {"header", "headers"}:
+        return "header"
+    if suffix in {".svd", ".xml"} or candidate.category == "svd":
+        return "svd"
+    if suffix in {".pdf", ".txt", ".md", ".html", ".htm"}:
+        return "docs"
+    return candidate.category
 
 
 @dataclass
@@ -322,6 +428,12 @@ def _score_result(result: SearchResult, category: str, mcu: str, peripheral: str
             score += 10
         if "register map" in title_lower:
             score += 5
+        if any(ext in url_lower for ext in _DEVICE_TREE_EXTS):
+            score += 20
+        if "device tree" in title_lower or "device-tree" in title_lower:
+            score += 15
+        if "dts" in title_lower or "dtsi" in title_lower:
+            score += 10
     elif category == "driver":
         if ".c" in url_lower:
             score += 10
@@ -428,8 +540,10 @@ class GenericDataFetcher:
 
         # Documentation queries (broad: include vendor terms)
         queries.append((f"{mcu} {peripheral} datasheet register map", "docs"))
+        queries.append((f"{mcu} {peripheral} device tree dts dtsi", "docs"))
         for term in extra_terms[:2]:
             queries.append((f"{term} {peripheral} register map datasheet", "docs"))
+            queries.append((f"{term} {peripheral} device tree dts dtsi", "docs"))
 
         # Driver queries — target raw source files specifically
         queries.append((f"{mcu} {peripheral} driver source code site:github.com", "driver"))
@@ -501,6 +615,41 @@ class GenericDataFetcher:
         all_candidates.sort(key=lambda c: c.score, reverse=True)
         return all_candidates
 
+    def select_candidates(
+        self,
+        candidates: list[SearchCandidate],
+        *,
+        limit: int = 10,
+    ) -> list[SearchCandidate]:
+        """Select top-k candidates independently for each useful file type."""
+        selected: list[SearchCandidate] = []
+        seen_urls: set[str] = set()
+        by_file_type: dict[str, list[SearchCandidate]] = {}
+        type_order: list[str] = []
+
+        for candidate in candidates:
+            file_type = _candidate_file_type(candidate)
+            if file_type not in by_file_type:
+                by_file_type[file_type] = []
+                type_order.append(file_type)
+            by_file_type[file_type].append(candidate)
+
+        for file_type in type_order:
+            ranked = sorted(
+                by_file_type[file_type],
+                key=lambda item: item.score,
+                reverse=True,
+            )
+            for candidate in ranked[:limit]:
+                normalized = candidate.url.split("?")[0].rstrip("/")
+                if normalized in seen_urls:
+                    continue
+                seen_urls.add(normalized)
+                selected.append(candidate)
+
+        selected.sort(key=lambda item: item.score, reverse=True)
+        return selected
+
     def fetch_selected(
         self,
         candidates: list[SearchCandidate],
@@ -553,6 +702,7 @@ class GenericDataFetcher:
                 )
                 response = _urlopen_with_retry(request, timeout=self.search_timeout)
                 data = response.read()
+                data = _decode_gitiles_text_blob(download_url, data)
 
                 # Validate content matches expected category
                 rejection = _check_content(data, candidate.category, filename)
@@ -600,7 +750,7 @@ def _url_to_filename(url: str, category: str) -> str:
         "svd":    {".svd", ".xml"},
         "header": {".h"},
         "driver": {".c"},
-        "docs":   {".pdf", ".txt", ".md", ".html", ".htm"},
+        "docs":   {".pdf", ".txt", ".md", ".html", ".htm", ".dts", ".dtsi"},
     }
     _default_ext = {"svd": ".svd", "header": ".h", "driver": ".c", "docs": ".txt"}
 
@@ -718,6 +868,9 @@ def _check_content(data: bytes, category: str, filename: str) -> str | None:
                 return "Markdown document, not SVD file"
             if not text.startswith("<"):
                 return "Not an XML/SVD file"
-    # docs category: accept anything (PDF, text, markdown, HTML)
+    elif category == "docs":
+        if fname_ext in _DEVICE_TREE_EXTS and is_html:
+            return "HTML page, not DTS/DTSI source"
+    # docs category: accept anything else (PDF, text, markdown, HTML)
 
     return None

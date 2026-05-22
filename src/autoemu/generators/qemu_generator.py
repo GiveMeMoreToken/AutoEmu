@@ -1,10 +1,10 @@
 """QEMU peripheral model C code generator.
 
-Generates QEMU v9.2.4 compatible C source and header files from peripheral
+Generates latest-upstream-QEMU compatible C source and header files from peripheral
 models, following QEMU's Object model, MemoryRegionOps, and IRQ conventions.
 
-Target QEMU version: v9.2.4
-  - Uses device_class_set_legacy_reset() (dc->reset deprecated since 9.x)
+Target QEMU version: latest upstream QEMU
+  - Uses device_class_set_legacy_reset() instead of legacy dc->reset assignment
   - Meson build system integration
   - QTest harness generation for in-tree validation
 """
@@ -15,7 +15,7 @@ from autoemu.models.register import AccessType
 from autoemu.models.peripheral import Peripheral
 from autoemu.modeling_utils import snake_case as _snake, upper_case as _upper, normalize_name
 
-QEMU_TARGET_VERSION = "v9.2.4"
+QEMU_TARGET_VERSION = "latest upstream QEMU"
 
 
 def _device_prefix(peripheral: Peripheral) -> str:
@@ -49,7 +49,7 @@ def _generate_header(peripheral: Peripheral) -> str:
         f"#ifndef HW_{pfx_upper}_{upper}_H",
         f"#define HW_{pfx_upper}_{upper}_H",
         "",
-        "#include \"hw/sysbus.h\"",
+        "#include \"hw/core/sysbus.h\"",
         "#include \"qom/object.h\"",
         "",
         f"#define TYPE_{pfx_upper}_{upper} \"{pfx}-{snake}\"",
@@ -245,7 +245,7 @@ def _generate_source(peripheral: Peripheral) -> str:
         "",
         "#include \"qemu/osdep.h\"",
         f"#include \"hw/{pfx}_{snake}.h\"",
-        "#include \"hw/qdev-properties.h\"",
+        "#include \"hw/core/qdev-properties.h\"",
         "#include \"qemu/log.h\"",
         "#include \"migration/vmstate.h\"",
         "",
@@ -393,7 +393,7 @@ def _generate_source(peripheral: Peripheral) -> str:
 
 
 def _generate_meson_build(peripheral: Peripheral) -> str:
-    """Generate meson.build snippet for QEMU v9.2.4 in-tree integration."""
+    """Generate meson.build snippet for latest upstream QEMU in-tree integration."""
     snake = _snake(peripheral.name)
     upper = _upper(peripheral.name)
     pfx = _device_prefix(peripheral)
@@ -412,7 +412,7 @@ def _generate_meson_build(peripheral: Peripheral) -> str:
 
 
 def _generate_qtest(peripheral: Peripheral) -> str:
-    """Generate QTest test for QEMU v9.2.4 validation."""
+    """Generate QTest test for latest upstream QEMU validation."""
     snake = _snake(peripheral.name)
     upper = _upper(peripheral.name)
     pfx = _device_prefix(peripheral)
@@ -545,7 +545,7 @@ def generate_peripheral_code(
     peripheral: Peripheral,
     output_dir: str | Path,
 ) -> list[str]:
-    """Generate QEMU v9.2.4 peripheral model files.
+    """Generate latest-upstream-QEMU peripheral model files.
 
     Returns list of generated file paths.
     """

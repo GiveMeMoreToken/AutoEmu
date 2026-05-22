@@ -1,4 +1,4 @@
-"""Tests for code generators (targeting QEMU v9.2.4)."""
+"""Tests for code generators targeting latest upstream QEMU."""
 
 import tempfile
 from pathlib import Path
@@ -78,7 +78,7 @@ def _make_test_peripheral() -> Peripheral:
 
 class TestQEMUGenerator:
     def test_target_version(self):
-        assert QEMU_TARGET_VERSION == "v9.2.4"
+        assert QEMU_TARGET_VERSION == "latest upstream QEMU"
 
     def test_generates_files(self):
         periph = _make_test_peripheral()
@@ -100,15 +100,17 @@ class TestQEMUGenerator:
             header = [f for f in files if f.endswith(".h")][0]
             content = Path(header).read_text()
 
-            assert "QEMU v9.2.4" in content
+            assert "latest upstream QEMU" in content
             assert "TYPE_STM32F4_TEST_PERIPH" in content
+            assert 'hw/core/sysbus.h' in content
+            assert 'hw/sysbus.h' not in content
             assert "TEST_PERIPH_CR_OFFSET" in content
             assert "TEST_PERIPH_SR_OFFSET" in content
             assert "MemoryRegion mmio" in content
             assert "qemu_irq irq" in content
 
-    def test_source_v924_apis(self):
-        """Verify generated C code uses QEMU v9.2.4 APIs."""
+    def test_source_latest_qemu_apis(self):
+        """Verify generated C code uses current QEMU APIs."""
         periph = _make_test_peripheral()
         with tempfile.TemporaryDirectory() as tmpdir:
             files = generate_peripheral_code(periph, tmpdir)
@@ -123,12 +125,13 @@ class TestQEMUGenerator:
             assert "type_register_static" in content
             assert "Write-1-to-clear" in content
 
-            # QEMU v9.2.4 specific: device_class_set_legacy_reset
+            # Current QEMU reset API: device_class_set_legacy_reset
             assert "device_class_set_legacy_reset" in content
             assert "dc->reset" not in content
 
-            # QEMU v9.2.4 specific: hw/qdev-properties.h
-            assert 'hw/qdev-properties.h' in content
+            # DeviceClass access in latest QEMU requires hw/core/qdev-properties.h
+            assert 'hw/core/qdev-properties.h' in content
+            assert 'hw/qdev-properties.h' not in content
 
             # VMSTATE uses bare field names (not s->field)
             assert "VMSTATE_UINT32(cr," in content

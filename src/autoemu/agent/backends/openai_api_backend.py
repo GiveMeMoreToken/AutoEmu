@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - exercised only without optional SDK
 
 AsyncOpenAI: Any = _AsyncOpenAI
 
-_DEFAULT_MODEL = "gpt-5"
+_DEFAULT_MODEL = "gpt-5.5"
 
 
 def _json_type(ptype: type) -> str:

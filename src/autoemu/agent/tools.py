@@ -466,8 +466,14 @@ async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
 
         fetcher = GenericDataFetcher()
         candidates = fetcher.discover_candidates(target_mcu, target_peripheral)
+        select_candidates = getattr(fetcher, "select_candidates", None)
+        selected = (
+            select_candidates(candidates, limit=10)
+            if select_candidates
+            else candidates[:10]
+        )
         fetch_result = fetcher.fetch_selected(
-            candidates[:10], data_dir,
+            selected, data_dir,
             target_mcu=target_mcu, target_peripheral=target_peripheral,
         )
 

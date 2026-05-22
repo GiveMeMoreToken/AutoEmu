@@ -17,6 +17,10 @@ from autoemu.parsers.driver_parser import (
     InitSequence,
     analyze_driver_file,
 )
+from autoemu.parsers.device_tree import (
+    apply_mmio_region_to_register_blocks,
+    infer_mmio_region_from_device_trees,
+)
 from autoemu.parsers.register_extractor import extract_register_blocks
 
 
@@ -47,6 +51,14 @@ def run_model_pipeline(
         svd_path=str(svd_path or ""),
         header_path=str(header_path or ""),
         peripheral_name=peripheral_name,
+    )
+    register_blocks = apply_mmio_region_to_register_blocks(
+        register_blocks,
+        peripheral_name=peripheral_name,
+        mmio_region=infer_mmio_region_from_device_trees(
+            doc_path_list,
+            peripheral_name,
+        ),
     )
     register_path = _write_json(
         output_path / f"{_snake(peripheral_name)}_registers.json",

@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
 
 a = Analysis(
     ['src/autoemu/main.py'],
@@ -9,11 +11,15 @@ a = Analysis(
     hiddenimports=[
         'autoemu.agent.backends.claude_backend',
         'autoemu.agent.backends.codex_backend',
-        'autoemu.agent.backends.openai_backend',
+        'autoemu.agent.backends.anthropic_api_backend',
+        'autoemu.agent.backends.openai_api_backend',
         'autoemu.agent.runtime',
         'autoemu.tui',
         'autoemu.tui.app',
         'autoemu.tui.widgets',
+        *collect_submodules('codex_app_server'),
+        *collect_submodules('codex_app_server_client'),
+        *collect_submodules('codex_app_server_sdk'),
     ],
     hookspath=[],
     hooksconfig={},

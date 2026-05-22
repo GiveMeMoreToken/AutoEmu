@@ -189,6 +189,43 @@ typedef struct {
         assert block.get_register("CCR").access.value == "W1C"
         assert "Control register 1" in block.get_register("CR1").description
 
+    def test_parse_macro_only_register_map(self, tmp_path):
+        header = tmp_path / "linux_regs.h"
+        header.write_text(
+            """\
+#define GPU_ID                  0x00
+#define GPU_CMD                 0x30    /* (WO) command register */
+#define GPU_CMD_START           0x01
+#define GPU_STATUS              0x34    /* (RO) status register */
+#define JOB_INT_RAWSTAT         0x1000
+#define JOB_INT_CLEAR           0x1004
+#define JS_BASE                 0x1800
+#define JS_SLOT_STRIDE          0x80
+#define JS_HEAD_LO(n)           (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00)
+#define JS_STATUS(n)            (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x24)
+#define JS_COMMAND_START        0x01
+#define JS_CONFIG_END_FLUSH_CLEAN_INVALIDATE (3u << 12)
+#define JS_CONFIG_THREAD_PRI(n) ((n) << 16)
+""",
+            encoding="utf-8",
+        )
+
+        block = parse_header_file(header, "GPU")["GPU"]
+        names = {reg.name for reg in block.registers}
+
+        assert "GPU_ID" in names
+        assert "GPU_CMD" in names
+        assert "GPU_CMD_START" not in names
+        assert "JOB_INT_RAWSTAT" in names
+        assert "JS_HEAD_LO_0" in names
+        assert "JS_STATUS_1" in names
+        assert "JS_BASE" not in names
+        assert "JS_CONFIG_END_FLUSH_CLEAN_INVALIDATE" not in names
+        assert "JS_CONFIG_THREAD_PRI_1" not in names
+        assert block.get_register("GPU_CMD").access.value == "WO"
+        assert block.get_register("GPU_STATUS").access.value == "RO"
+        assert block.get_register("JS_STATUS_1").offset == 0x18A4
+
 
 class TestRegisterExtractor:
     def test_merge_register_blocks_prefers_semantic_primary(self):
