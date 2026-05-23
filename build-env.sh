@@ -12,6 +12,9 @@ ARCH="${ARCH:-aarch64}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
 CLEAN="${CLEAN:-0}"
 
+# Prevent any interactive prompts during builds
+export TERM=dumb
+
 LINUX_VERSION="6.12.28"
 QEMU_VERSION="9.2.0"
 BUILDROOT_VERSION="2024.02.10"
@@ -90,6 +93,8 @@ build_qemu() {
             --target-list="$QEMU_TARGET" \
             --disable-werror \
             --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
             --prefix="$QEMU_INSTALL"
         make -j"$JOBS"
         make install
@@ -109,17 +114,24 @@ build_linux() {
     echo "[build] Linux for $ARCH (arch: $LINUX_ARCH, defconfig: $LINUX_DEFCONFIG)"
     mkdir -p "$LINUX_BUILD"
 
-    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" "${LINUX_DEFCONFIG}"
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" "${LINUX_DEFCONFIG}" < /dev/null
+
+    local fragment="$ROOT_DIR/configs/linux-$ARCH.fragment"
+    if [[ -f "$fragment" ]]; then
+        echo "[build] Applying config fragment: $fragment"
+        cat "$fragment" >> "$LINUX_BUILD/.config"
+    fi
 
     if [[ "$ARCH" == "mipsel" ]]; then
         echo "CONFIG_CPU_LITTLE_ENDIAN=y" >> "$LINUX_BUILD/.config"
-        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" olddefconfig
     fi
 
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" olddefconfig < /dev/null
+
     if [[ -n "$CROSS_COMPILE" ]]; then
-        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" -j"$JOBS"
+        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" -j"$JOBS" < /dev/null
     else
-        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" -j"$JOBS"
+        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" -j"$JOBS" < /dev/null
     fi
 
     mkdir -p "$OUTPUT_DIR"
@@ -146,7 +158,7 @@ build_buildroot() {
     mkdir -p "$BUILDROOT_BUILD"
 
     make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" "$BUILDROOT_DEFCONFIG"
-    make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" -j"$JOBS"
+    make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" -j"$JOBS" < /dev/null
 
     mkdir -p "$OUTPUT_DIR"
     cp "$BUILDROOT_BUILD/images/rootfs.ext4" "$OUTPUT_DIR/rootfs-$ARCH.ext4"
