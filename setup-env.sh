@@ -21,21 +21,33 @@ BUILDROOT_SHA256="b193867d91ed468925a76828bd35ba64d8b4bd1ec238e35db8722fdd406926
 download_file() {
     local url="$1"
     local dest="$2"
+    local tmp_dest="${dest}.tmp"
+
+    cleanup_tmp() {
+        if [[ -f "$tmp_dest" ]]; then
+            rm -f "$tmp_dest"
+        fi
+    }
+    trap cleanup_tmp EXIT
+
     if command -v wget &>/dev/null; then
-        wget -q -O "$dest" "$url"
+        wget -q -O "$tmp_dest" "$url"
     elif command -v curl &>/dev/null; then
-        curl -sL -o "$dest" "$url"
+        curl -sL -o "$tmp_dest" "$url"
     else
         echo "ERROR: wget or curl is required" >&2
         exit 1
     fi
+
+    mv -f "$tmp_dest" "$dest"
+    trap - EXIT
 }
 
 verify_checksum() {
     local file="$1"
     local expected="$2"
     local actual
-    actual="$(sha256sum "$file" | awk '{print $1}')"
+    actual="$(sha256sum -- "$file" | awk '{print $1}')"
     if [[ "$actual" != "$expected" ]]; then
         echo "ERROR: SHA256 mismatch for $file" >&2
         echo "  expected: $expected" >&2
@@ -77,7 +89,11 @@ setup_component() {
         echo "[setup] ${name}: source already extracted"
     fi
 
-    mkdir -p "$STAMP_DIR"
+    if [[ ! -d "$src_dir" ]]; then
+        echo "ERROR: ${name}: expected source directory ${src_dir} not found after extraction" >&2
+        exit 1
+    fi
+
     touch "$stamp"
     echo "[setup] ${name}: done"
 }
