@@ -21,7 +21,7 @@ BUILDROOT_SHA256="b193867d91ed468925a76828bd35ba64d8b4bd1ec238e35db8722fdd406926
 download_file() {
     local url="$1"
     local dest="$2"
-    local tmp_dest="${dest}.tmp"
+    tmp_dest="${dest}.tmp"
 
     cleanup_tmp() {
         if [[ -f "$tmp_dest" ]]; then
