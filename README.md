@@ -104,6 +104,46 @@ header validation is enabled when AutoEmu can resolve a QEMU source tree. Set
 `AUTOEMU_QEMU_SRC=latest` to clone/update the upstream QEMU master branch in
 AutoEmu's managed cache.
 
+## Build Environment
+
+Three shell scripts manage a self-contained build environment for compiling QEMU,
+Linux, and Buildroot from upstream source and running a minimal VM.
+
+| Script | Purpose |
+|--------|---------|
+| `setup-env.sh` | Download and extract Linux 6.12.28, QEMU 9.2.0, and Buildroot 2024.02.10 into `env/src/` |
+| `build-env.sh` | Compile QEMU, Linux, and Buildroot out-of-tree with stamp-file resumability |
+| `run.sh` | Launch a minimal VM using the compiled artifacts |
+
+**Supported architectures:** `x86_64`, `aarch64` (default), `riscv64`, `mipsel`
+
+**Quick start:**
+
+```bash
+./setup-env.sh                    # fetch sources
+./build-env.sh                    # compile for aarch64
+./run.sh                          # boot the VM
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARCH` | `aarch64` | Target architecture |
+| `JOBS` | `$(nproc)` | Parallel build jobs |
+| `CLEAN` | `0` | Force rebuild by removing stamps |
+| `MEMORY` | `512M` | VM RAM |
+| `EXTRA_QEMU_OPTS` | `""` | Additional QEMU arguments |
+
+Cross-compilers are required for non-native architectures:
+- `aarch64`: `aarch64-linux-gnu-gcc`
+- `riscv64`: `riscv64-linux-gnu-gcc`
+- `mipsel`: `mipsel-linux-gnu-gcc`
+
+Per-architecture kernel config fragments live in `configs/linux-*.fragment` to
+ensure virtio/IDE, EXT4, and serial console drivers are enabled for QEMU boot.
+Builds are fully non-interactive (`TERM=dumb`, stdin redirected from `/dev/null`).
+
 ## Usage
 
 ### Interactive TUI
