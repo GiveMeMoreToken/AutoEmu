@@ -55,8 +55,13 @@ QEMU_BIN="$OUTPUT_DIR/qemu-system-$ARCH"
 KERNEL="$OUTPUT_DIR/kernel"
 ROOTFS="$OUTPUT_DIR/rootfs.ext4"
 
-for f in "$QEMU_BIN" "$KERNEL" "$ROOTFS"; do
-    if [[ ! -e "$f" ]]; then
+if [[ ! -x "$QEMU_BIN" ]]; then
+    echo "ERROR: Missing or non-executable QEMU binary: $QEMU_BIN" >&2
+    echo "Run: ./build-env.sh ARCH=$ARCH" >&2
+    exit 1
+fi
+for f in "$KERNEL" "$ROOTFS"; do
+    if [[ ! -f "$f" ]]; then
         echo "ERROR: Missing artifact: $f" >&2
         echo "Run: ./build-env.sh ARCH=$ARCH" >&2
         exit 1
@@ -73,12 +78,14 @@ QEMU_ARGS=(
     -nographic
 )
 
-if [[ "$ARCH" == "$HOST_ARCH" && -e /dev/kvm ]]; then
+if [[ "$ARCH" == "$HOST_ARCH" && -r /dev/kvm && -w /dev/kvm ]]; then
     echo "[run] KVM detected, enabling acceleration"
     QEMU_ARGS+=(-enable-kvm)
 fi
 
 if [[ -n "$EXTRA_QEMU_OPTS" ]]; then
+    # NOTE: EXTRA_QEMU_OPTS is split on whitespace. Multi-word arguments
+    # (e.g. -device "foo bar") are not supported via this env var.
     read -ra EXTRA_ARGS <<< "$EXTRA_QEMU_OPTS"
     QEMU_ARGS+=("${EXTRA_ARGS[@]}")
 fi
