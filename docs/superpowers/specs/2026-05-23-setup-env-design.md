@@ -31,12 +31,12 @@ clean.
 
 ## Architecture Support
 
-| `ARCH` value | QEMU target | Linux defconfig | Buildroot defconfig | QEMU machine | QEMU CPU | Console | Drive IF |
-|--------------|-------------|-----------------|---------------------|--------------|----------|---------|----------|
-| `x86_64` | `x86_64-softmmu` | `x86_64_defconfig` | `qemu_x86_64_defconfig` | `pc` | `qemu64` | `ttyS0` | `virtio` |
-| `aarch64` (default) | `aarch64-softmmu` | `defconfig` (ARCH=arm64) | `qemu_aarch64_virt_defconfig` | `virt` | `cortex-a72` | `ttyAMA0` | `virtio` |
-| `riscv64` | `riscv64-softmmu` | `defconfig` (ARCH=riscv) | `qemu_riscv64_virt_defconfig` | `virt` | `rv64` | `ttyS0` | `virtio` |
-| `mipsel` | `mipsel-softmmu` | `malta_defconfig` | `qemu_mipsel_malta_defconfig` | `malta` | `24Kf` | `ttyS0` | `ide` |
+| `ARCH` value | QEMU target | Linux defconfig | Buildroot defconfig | QEMU machine | QEMU CPU | Console | Drive IF | Root dev | Cross compiler |
+|--------------|-------------|-----------------|---------------------|--------------|----------|---------|----------|----------|----------------|
+| `x86_64` | `x86_64-softmmu` | `x86_64_defconfig` | `qemu_x86_64_defconfig` | `pc` | `qemu64` | `ttyS0` | `virtio` | `/dev/vda` | none (native) |
+| `aarch64` (default) | `aarch64-softmmu` | `defconfig` (ARCH=arm64) | `qemu_aarch64_virt_defconfig` | `virt` | `cortex-a72` | `ttyAMA0` | `virtio` | `/dev/vda` | `aarch64-linux-gnu-` |
+| `riscv64` | `riscv64-softmmu` | `defconfig` (ARCH=riscv) | `qemu_riscv64_virt_defconfig` | `virt` | `rv64` | `ttyS0` | `virtio` | `/dev/vda` | `riscv64-linux-gnu-` |
+| `mipsel` | `mipsel-softmmu` | `malta_defconfig` (set `CONFIG_CPU_LITTLE_ENDIAN=y`) | `qemu_mips32r2el_malta_defconfig` | `malta` | `24Kf` | `ttyS0` | `ide` | `/dev/hda` | `mipsel-linux-gnu-` |
 
 ## File Layout
 
@@ -100,7 +100,11 @@ Top-level scripts:
    - Skip if `.stamps/build-linux` exists.
    - Run `make O=env/build/linux ARCH=<linux_arch> <defconfig>`.
    - Run `make O=env/build/linux ARCH=<linux_arch> -j$JOBS`.
-   - Copy the produced kernel image (`Image`, `bzImage`, or `vmlinux` depending on architecture) to `env/output/kernel`.
+   - Copy the produced kernel image to `env/output/kernel`. Exact source paths per architecture:
+     - x86_64: `env/build/linux/arch/x86/boot/bzImage`
+     - aarch64: `env/build/linux/arch/arm64/boot/Image`
+     - riscv64: `env/build/linux/arch/riscv/boot/Image`
+     - mipsel: `env/build/linux/vmlinux.bin` (or `vmlinux` if ELF boot)
    - Write `.stamps/build-linux`.
 5. **Buildroot build:**
    - Skip if `.stamps/build-buildroot` exists.
@@ -125,8 +129,10 @@ Top-level scripts:
    - `-cpu <cpu>`
    - `-kernel env/output/kernel`
    - `-drive file=env/output/rootfs.ext4,format=raw,if=<drive_if>`
-   - `-append "root=/dev/vda rw console=<console> nographic"`
+   - `-append "root=<root_dev> rw console=<console> nographic"`
    - `-nographic`
+   - Optional: `-serial mon:stdio` for monitor multiplexing
+   - Optional: auto-detect and add `-enable-kvm` when host CPU matches target (x86_64/aarch64)
 4. Document how to exit: Ctrl+A then X.
 
 ## Data Flow
@@ -148,9 +154,9 @@ run.sh
 
 ## Error Handling
 
-- **Missing dependencies:** Each script checks for required tools (`wget` or `curl`, `tar`, `make`, `gcc`, `bison`, `flex`) and fails fast with a helpful message.
+- **Missing dependencies:** Each script checks for required tools (`wget` or `curl`, `tar`, `make`, `gcc`, `bison`, `flex`). For non-native architectures (`aarch64`, `riscv64`, `mipsel`), it also checks that the corresponding `CROSS_COMPILE` toolchain (e.g. `aarch64-linux-gnu-gcc`) is present in `PATH`.
 - **Partial build:** `build-env.sh` uses stamp files to resume from the last successful step.
-- **Force rebuild:** Setting `CLEAN=1` removes build stamps so the next run rebuilds everything.
+- **Force rebuild:** Setting `CLEAN=1` removes build stamps so the next run rebuilds everything. This is required after changing source versions in the script, since stamps do not auto-invalidate on version bumps.
 - **Architecture mismatch:** `run.sh` checks that output artifacts match the requested `ARCH` and exits with a clear hint if not.
 
 ## Testing Strategy
@@ -168,3 +174,5 @@ run.sh
 | Host missing build dependencies | Scripts check prerequisites before starting |
 | QEMU configure fails on exotic hosts | `--disable-werror` and `--disable-docs` reduce host sensitivity |
 | Architecture-specific QEMU CLI drift | Each `ARCH` has its own explicit flag block in `run.sh` |
+| Buildroot userspace vs standalone Linux kernel version mismatch | Buildroot defconfigs are generally kernel-version-agnostic for userspace; known risk if drivers drift |
+| Terminal state corrupted after `-nographic` QEMU exit | `run.sh` uses `-serial mon:stdio` and documents `Ctrl+A X`; optionally runs `stty sane` on exit |
