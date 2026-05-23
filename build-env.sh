@@ -20,10 +20,10 @@ LINUX_SRC="$SRC_DIR/linux-${LINUX_VERSION}"
 QEMU_SRC="$SRC_DIR/qemu-${QEMU_VERSION}"
 BUILDROOT_SRC="$SRC_DIR/buildroot-${BUILDROOT_VERSION}"
 
-LINUX_BUILD="$BUILD_DIR/linux"
-QEMU_BUILD="$BUILD_DIR/qemu"
+LINUX_BUILD="$BUILD_DIR/linux-$ARCH"
+QEMU_BUILD="$BUILD_DIR/qemu-$ARCH"
 QEMU_INSTALL="$QEMU_BUILD/install/"
-BUILDROOT_BUILD="$BUILD_DIR/buildroot"
+BUILDROOT_BUILD="$BUILD_DIR/buildroot-$ARCH"
 
 case "$ARCH" in
     x86_64)
@@ -138,7 +138,7 @@ build_linux() {
             kernel_src="$LINUX_BUILD/vmlinux"
             ;;
     esac
-    cp "$kernel_src" "$OUTPUT_DIR/kernel"
+    cp "$kernel_src" "$OUTPUT_DIR/kernel-$ARCH"
 }
 
 build_buildroot() {
@@ -149,7 +149,7 @@ build_buildroot() {
     make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" -j"$JOBS"
 
     mkdir -p "$OUTPUT_DIR"
-    cp "$BUILDROOT_BUILD/images/rootfs.ext4" "$OUTPUT_DIR/rootfs.ext4"
+    cp "$BUILDROOT_BUILD/images/rootfs.ext4" "$OUTPUT_DIR/rootfs-$ARCH.ext4"
 }
 
 main() {
@@ -166,28 +166,28 @@ main() {
 
     if [[ "$CLEAN" == "1" ]]; then
         echo "[build] CLEAN=1: removing build stamps"
-        rm -f "$STAMP_DIR"/build-*
+        rm -f "$STAMP_DIR"/build-*-"$ARCH"
     fi
 
-    if [[ -f "$STAMP_DIR/build-qemu" ]]; then
+    if [[ -f "$STAMP_DIR/build-qemu-$ARCH" ]]; then
         echo "[build] QEMU already built, skipping"
     else
         build_qemu
-        touch "$STAMP_DIR/build-qemu"
+        touch "$STAMP_DIR/build-qemu-$ARCH"
     fi
 
-    if [[ -f "$STAMP_DIR/build-linux" ]]; then
+    if [[ -f "$STAMP_DIR/build-linux-$ARCH" ]]; then
         echo "[build] Linux already built, skipping"
     else
         build_linux
-        touch "$STAMP_DIR/build-linux"
+        touch "$STAMP_DIR/build-linux-$ARCH"
     fi
 
-    if [[ -f "$STAMP_DIR/build-buildroot" ]]; then
+    if [[ -f "$STAMP_DIR/build-buildroot-$ARCH" ]]; then
         echo "[build] Buildroot already built, skipping"
     else
         build_buildroot
-        touch "$STAMP_DIR/build-buildroot"
+        touch "$STAMP_DIR/build-buildroot-$ARCH"
     fi
 
     echo "[build] All builds complete for ARCH=$ARCH"

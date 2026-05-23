@@ -52,6 +52,7 @@ verify_checksum() {
         echo "ERROR: SHA256 mismatch for $file" >&2
         echo "  expected: $expected" >&2
         echo "  actual:   $actual" >&2
+        rm -f -- "$file"
         exit 1
     fi
 }

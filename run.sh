@@ -52,8 +52,8 @@ case "$ARCH" in
 esac
 
 QEMU_BIN="$OUTPUT_DIR/qemu-system-$ARCH"
-KERNEL="$OUTPUT_DIR/kernel"
-ROOTFS="$OUTPUT_DIR/rootfs.ext4"
+KERNEL="$OUTPUT_DIR/kernel-$ARCH"
+ROOTFS="$OUTPUT_DIR/rootfs-$ARCH.ext4"
 
 if [[ ! -x "$QEMU_BIN" ]]; then
     echo "ERROR: Missing or non-executable QEMU binary: $QEMU_BIN" >&2
