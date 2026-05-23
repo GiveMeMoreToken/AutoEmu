@@ -120,7 +120,7 @@ build_linux() {
     echo "[build] Linux for $ARCH (arch: $LINUX_ARCH, defconfig: $LINUX_DEFCONFIG)"
     mkdir -p "$LINUX_BUILD"
 
-    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" "${LINUX_DEFCONFIG}" < /dev/null
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" "${LINUX_DEFCONFIG}" < /dev/null
 
     local fragment="$ROOT_DIR/configs/linux-$ARCH.fragment"
     if [[ -f "$fragment" ]]; then
@@ -132,7 +132,7 @@ build_linux() {
         echo "CONFIG_CPU_LITTLE_ENDIAN=y" >> "$LINUX_BUILD/.config"
     fi
 
-    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" olddefconfig < /dev/null
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" olddefconfig < /dev/null
 
     local cc="${CROSS_COMPILE:-}gcc"
     if command -v ccache &>/dev/null; then
@@ -140,7 +140,11 @@ build_linux() {
         echo "[build] ccache enabled for Linux"
     fi
 
-    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CC="$cc" -j"$JOBS" < /dev/null
+    local ld="${CROSS_COMPILE:-}ld"
+    if [[ -n "$CROSS_COMPILE" ]]; then
+        ld="${CROSS_COMPILE}ld"
+    fi
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" CC="$cc" LD="$ld" -j"$JOBS" < /dev/null
 
     mkdir -p "$OUTPUT_DIR"
     local kernel_src

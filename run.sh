@@ -43,7 +43,7 @@ case "$ARCH" in
         QEMU_CPU="24Kf"
         CONSOLE="ttyS0"
         DRIVE_IF="ide"
-        ROOT_DEV="/dev/hda"
+        ROOT_DEV="/dev/sda"
         ;;
     *)
         echo "ERROR: Unsupported ARCH='$ARCH'. Supported: x86_64, aarch64, riscv64, mipsel" >&2
