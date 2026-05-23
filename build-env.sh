@@ -84,19 +84,25 @@ prereq_check() {
 build_qemu() {
     echo "[build] QEMU for $ARCH (target: $QEMU_TARGET)"
     mkdir -p "$QEMU_BUILD"
-    cd "$QEMU_BUILD"
+    (
+        cd "$QEMU_BUILD"
+        "$QEMU_SRC/configure" \
+            --target-list="$QEMU_TARGET" \
+            --disable-werror \
+            --disable-docs \
+            --prefix="$QEMU_INSTALL"
+        make -j"$JOBS"
+        make install
+    )
 
-    "$QEMU_SRC/configure" \
-        --target-list="$QEMU_TARGET" \
-        --disable-werror \
-        --disable-docs \
-        --prefix="$QEMU_INSTALL"
-
-    make -j"$JOBS"
-    make install
+    local qemu_bin="$QEMU_INSTALL/bin/qemu-system-$ARCH"
+    if [[ ! -e "$qemu_bin" ]]; then
+        echo "ERROR: QEMU binary not found after install: $qemu_bin" >&2
+        exit 1
+    fi
 
     mkdir -p "$OUTPUT_DIR"
-    ln -sf "$QEMU_INSTALL/bin/qemu-system-$ARCH" "$OUTPUT_DIR/qemu-system-$ARCH"
+    ln -sf "$qemu_bin" "$OUTPUT_DIR/qemu-system-$ARCH"
 }
 
 build_linux() {
@@ -147,6 +153,14 @@ build_buildroot() {
 }
 
 main() {
+    for src_dir in "$QEMU_SRC" "$LINUX_SRC" "$BUILDROOT_SRC"; do
+        if [[ ! -d "$src_dir" ]]; then
+            echo "ERROR: Source directory missing: $src_dir" >&2
+            echo "       Run ./setup-env.sh first to fetch sources." >&2
+            exit 1
+        fi
+    done
+
     prereq_check
     mkdir -p "$BUILD_DIR" "$STAMP_DIR" "$OUTPUT_DIR"
 
