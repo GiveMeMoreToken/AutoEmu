@@ -89,12 +89,18 @@ build_qemu() {
     mkdir -p "$QEMU_BUILD"
     (
         cd "$QEMU_BUILD"
+        local cc="gcc"
+        if command -v ccache &>/dev/null; then
+            cc="ccache gcc"
+            echo "[build] ccache enabled for QEMU"
+        fi
         "$QEMU_SRC/configure" \
             --target-list="$QEMU_TARGET" \
             --disable-werror \
             --disable-docs \
             --disable-gtk \
             --disable-sdl \
+            --cc="$cc" \
             --prefix="$QEMU_INSTALL"
         make -j"$JOBS"
         make install
@@ -128,11 +134,13 @@ build_linux() {
 
     make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" olddefconfig < /dev/null
 
-    if [[ -n "$CROSS_COMPILE" ]]; then
-        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CROSS_COMPILE="$CROSS_COMPILE" -j"$JOBS" < /dev/null
-    else
-        make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" -j"$JOBS" < /dev/null
+    local cc="${CROSS_COMPILE:-}gcc"
+    if command -v ccache &>/dev/null; then
+        cc="ccache $cc"
+        echo "[build] ccache enabled for Linux"
     fi
+
+    make -C "$LINUX_SRC" O="$LINUX_BUILD" ARCH="$LINUX_ARCH" CC="$cc" -j"$JOBS" < /dev/null
 
     mkdir -p "$OUTPUT_DIR"
     local kernel_src
@@ -158,6 +166,17 @@ build_buildroot() {
     mkdir -p "$BUILDROOT_BUILD"
 
     make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" "$BUILDROOT_DEFCONFIG"
+
+    local dl_dir="$ENV_DIR/dl"
+    mkdir -p "$dl_dir"
+    echo "BR2_DL_DIR=\"$dl_dir\"" >> "$BUILDROOT_BUILD/.config"
+
+    if command -v ccache &>/dev/null; then
+        echo "BR2_CCACHE=y" >> "$BUILDROOT_BUILD/.config"
+        echo "[build] ccache enabled for Buildroot"
+    fi
+
+    make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" olddefconfig < /dev/null
     make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" -j"$JOBS" < /dev/null
 
     mkdir -p "$OUTPUT_DIR"
