@@ -111,18 +111,18 @@ Linux, and Buildroot from upstream source and running a minimal VM.
 
 | Script | Purpose |
 |--------|---------|
-| `setup-env.sh` | Download and extract Linux 6.12.28, QEMU 9.2.0, and Buildroot 2024.02.10 into `env/src/` |
-| `build-env.sh` | Compile QEMU, Linux, and Buildroot out-of-tree with stamp-file resumability |
-| `run.sh` | Launch a minimal VM using the compiled artifacts |
+| `scripts/setup-env.sh` | Download and extract Linux 6.12.28, QEMU 9.2.0, and Buildroot 2024.02.10 into `env/src/` |
+| `scripts/build-env.sh` | Compile QEMU, Linux, and Buildroot out-of-tree with stamp-file resumability |
+| `scripts/run.sh` | Launch a minimal VM using the compiled artifacts |
 
 **Supported architectures:** `x86_64`, `aarch64` (default), `riscv64`, `mipsel`
 
 **Quick start:**
 
 ```bash
-./setup-env.sh                    # fetch sources
-./build-env.sh                    # compile for aarch64
-./run.sh                          # boot the VM
+./scripts/setup-env.sh            # fetch sources
+./scripts/build-env.sh            # compile for aarch64
+./scripts/run.sh                  # boot the VM
 ```
 
 **Environment variables:**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_DIR="$ROOT_DIR/env"
 SRC_DIR="$ENV_DIR/src"
 BUILD_DIR="$ENV_DIR/build"
@@ -196,7 +196,7 @@ main() {
     for src_dir in "$QEMU_SRC" "$LINUX_SRC" "$BUILDROOT_SRC"; do
         if [[ ! -d "$src_dir" ]]; then
             echo "ERROR: Source directory missing: $src_dir" >&2
-            echo "       Run ./setup-env.sh first to fetch sources." >&2
+            echo "       Run ./scripts/setup-env.sh first to fetch sources." >&2
             exit 1
         fi
     done

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_DIR="$ROOT_DIR/env"
 OUTPUT_DIR="$ENV_DIR/output"
 
@@ -57,13 +57,13 @@ ROOTFS="$OUTPUT_DIR/rootfs-$ARCH.ext4"
 
 if [[ ! -x "$QEMU_BIN" ]]; then
     echo "ERROR: Missing or non-executable QEMU binary: $QEMU_BIN" >&2
-    echo "Run: ./build-env.sh ARCH=$ARCH" >&2
+    echo "Run: ./scripts/build-env.sh ARCH=$ARCH" >&2
     exit 1
 fi
 for f in "$KERNEL" "$ROOTFS"; do
     if [[ ! -f "$f" ]]; then
         echo "ERROR: Missing artifact: $f" >&2
-        echo "Run: ./build-env.sh ARCH=$ARCH" >&2
+        echo "Run: ./scripts/build-env.sh ARCH=$ARCH" >&2
         exit 1
     fi
 done
