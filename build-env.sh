@@ -170,6 +170,7 @@ build_buildroot() {
     local dl_dir="$ENV_DIR/dl"
     mkdir -p "$dl_dir"
     echo "BR2_DL_DIR=\"$dl_dir\"" >> "$BUILDROOT_BUILD/.config"
+    echo "BR2_TARGET_ROOTFS_EXT2_4=y" >> "$BUILDROOT_BUILD/.config"
 
     if command -v ccache &>/dev/null; then
         echo "BR2_CCACHE=y" >> "$BUILDROOT_BUILD/.config"
@@ -180,7 +181,11 @@ build_buildroot() {
     make O="$BUILDROOT_BUILD" -C "$BUILDROOT_SRC" -j"$JOBS" < /dev/null
 
     mkdir -p "$OUTPUT_DIR"
-    cp "$BUILDROOT_BUILD/images/rootfs.ext4" "$OUTPUT_DIR/rootfs-$ARCH.ext4"
+    local rootfs_src="$BUILDROOT_BUILD/images/rootfs.ext4"
+    if [[ ! -f "$rootfs_src" ]]; then
+        rootfs_src="$BUILDROOT_BUILD/images/rootfs.ext2"
+    fi
+    cp "$rootfs_src" "$OUTPUT_DIR/rootfs-$ARCH.ext4"
 }
 
 main() {
