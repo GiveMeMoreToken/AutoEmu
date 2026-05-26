@@ -6,7 +6,7 @@ models, following QEMU's Object model, MemoryRegionOps, and IRQ conventions.
 Target QEMU version: latest upstream QEMU
   - Uses device_class_set_legacy_reset() instead of legacy dc->reset assignment
   - Meson build system integration
-  - QTest harness generation for in-tree validation
+  - QTest generation for in-tree validation
 """
 
 from pathlib import Path
@@ -49,7 +49,7 @@ def _generate_header(peripheral: Peripheral) -> str:
         f"#ifndef HW_{pfx_upper}_{upper}_H",
         f"#define HW_{pfx_upper}_{upper}_H",
         "",
-        "#include \"hw/core/sysbus.h\"",
+        "#include \"hw/sysbus.h\"",
         "#include \"qom/object.h\"",
         "",
         f"#define TYPE_{pfx_upper}_{upper} \"{pfx}-{snake}\"",
@@ -246,7 +246,7 @@ def _generate_source(peripheral: Peripheral) -> str:
         "",
         "#include \"qemu/osdep.h\"",
         f"#include \"{pfx}_{snake}.h\"",
-        "#include \"hw/core/qdev-properties.h\"",
+        "#include \"hw/qdev-properties.h\"",
         "#include \"qemu/log.h\"",
         "#include \"migration/vmstate.h\"",
         "",

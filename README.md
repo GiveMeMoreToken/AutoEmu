@@ -7,7 +7,7 @@ AutoEmu takes a target MCU or board name plus a peripheral identifier, gathers
 or accepts hardware inputs, builds a structured peripheral model, emits
 latest-upstream-QEMU-compatible artifacts, and validates the generated bundle.
 
-The deterministic harness path is the primary implementation. Agent backends
+The deterministic local pipeline is the primary implementation. Agent backends
 are optional helpers for fetch/build enrichment; they do not replace the local
 parsers, inference passes, generators, or validators.
 
@@ -208,7 +208,7 @@ Create `.autoemu.toml` in the working directory:
 
 ```toml
 [agent]
-backend = "harness"           # "harness", "claude-sdk", "codex-sdk", "anthropic-api", or "openai-api"
+backend = "codex-sdk"         # "claude-sdk", "codex-sdk", "anthropic-api", or "openai-api"
 model = ""                    # Optional backend-specific model override
 max_budget_usd = 5.0
 
@@ -226,7 +226,7 @@ Environment variables override the config file:
 
 | Variable | Purpose |
 |----------|---------|
-| `AUTOEMU_AGENT_BACKEND` | `harness`, `claude-sdk`, `codex-sdk`, `anthropic-api`, or `openai-api` |
+| `AUTOEMU_AGENT_BACKEND` | `claude-sdk`, `codex-sdk`, `anthropic-api`, or `openai-api` |
 | `AUTOEMU_AGENT_MODEL` | Optional model override |
 | `AUTOEMU_AGENT_MAX_BUDGET_USD` | Optional per-run budget limit for agent backends |
 | `ANTHROPIC_API_KEY` | Anthropic / Claude-compatible API key |
@@ -239,7 +239,6 @@ Backend modes:
 
 | Backend | Behavior |
 |---------|----------|
-| `harness` | Local deterministic pipeline only |
 | `claude-sdk` | Claude Agent SDK runtime |
 | `codex-sdk` | Codex app-server SDK runtime |
 | `anthropic-api` | Anthropic-compatible Messages API with AutoEmu tools |
@@ -269,9 +268,7 @@ output/
 └── eth_validation.json
 ```
 
-Fuzz harness generation is available through
-`autoemu.generators.fuzz_generator.generate_fuzz_harness()` and produces
-`fuzz_<peripheral>_regs.c` and `fuzz_<peripheral>_states.c`.
+
 
 ## Project Structure
 

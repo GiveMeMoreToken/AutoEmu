@@ -9,7 +9,6 @@ from typing import Any
 
 from autoemu.generators.qemu_generator import generate_peripheral_code
 from autoemu.generators.machine_patcher import generate_virt_patch
-from autoemu.generators.test_generator import generate_test_harness
 from autoemu.inference.dependency_inference import load_dependency_graph_json
 from autoemu.modeling_utils import (
     is_non_mmio_register,
@@ -233,8 +232,6 @@ def generate_model_bundle(
 
     generated_files = [str(peripheral_json_path)]
     generated_files.extend(generate_peripheral_code(peripheral, output_path))
-    generated_files.extend(generate_test_harness(peripheral, output_path))
-
     validation_report = verify_peripheral_consistency(peripheral, driver_analysis)
     validation_path = output_path / f"{snake}_validation.json"
     validation_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")

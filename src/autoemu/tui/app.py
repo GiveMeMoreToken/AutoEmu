@@ -74,13 +74,12 @@ class SettingsScreen(Container):
             yield Label("Backend:")
             yield Select(
                 [
-                    ("Harness (local)", "harness"),
                     ("Claude SDK", "claude-sdk"),
                     ("Codex SDK", "codex-sdk"),
                     ("Anthropic API", "anthropic-api"),
                     ("OpenAI API", "openai-api"),
                 ],
-                value="harness",
+                value="codex-sdk",
                 id="cfg-backend",
             )
         with Horizontal(classes="settings-row"):
@@ -297,9 +296,7 @@ class AutoEmuApp(App):
         cfg = AgentRuntimeConfig.load()
         backend = cfg.backend
         model = cfg.model or "default"
-        if backend == "harness":
-            text = "[dim]Backend:[/] [bold]harness[/] (local, no AI)"
-        elif backend == "claude-sdk":
+        if backend == "claude-sdk":
             base = f" @ {cfg.anthropic_base_url}" if cfg.anthropic_base_url else ""
             text = f"[dim]Backend:[/] [bold cyan]Claude SDK[/] model={model}{base}"
         elif backend == "codex-sdk":

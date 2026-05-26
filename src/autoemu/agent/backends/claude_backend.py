@@ -59,6 +59,11 @@ class ClaudeSdkBackend(AgentBackend):
             allowed_tools=tool_names,
             permission_mode="bypassPermissions",
             max_budget_usd=max_budget_usd,
+            # Ensure Claude Code CLI reads its default settings sources
+            # (user, project, local) so that authentication config from
+            # ~/.claude/settings.json is loaded.  The SDK otherwise passes
+            # --setting-sources "" which disables all sources.
+            setting_sources=["user", "project", "local"],
         )
         if model:
             opts.model = model

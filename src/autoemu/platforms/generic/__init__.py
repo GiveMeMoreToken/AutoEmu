@@ -83,6 +83,7 @@ class GenericPlatform(Platform):
             mmio_region=infer_mmio_region_from_device_trees(
                 bundle.documentation_paths,
                 bundle.peripheral,
+                target_mcu=bundle.target,
             ),
         )
 

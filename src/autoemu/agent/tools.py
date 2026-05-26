@@ -382,23 +382,6 @@ async def _generate_qemu_peripheral(args: dict[str, Any]) -> dict[str, Any]:
         return _err(f"QEMU generation failed: {e}\n{traceback.format_exc()}")
 
 
-async def _generate_test_harness(args: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from autoemu.generators.test_generator import generate_test_harness
-
-        peripheral = Peripheral.model_validate_json(args["peripheral_json"])
-        output_dir = Path(args.get("output_dir", "output"))
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        files = generate_test_harness(peripheral, output_dir)
-        return _ok(
-            f"Generated test harness ({len(files)} files):\n" +
-            "\n".join(f"  - {f}" for f in files)
-        )
-    except Exception as e:
-        return _err(f"Test generation failed: {e}")
-
-
 async def _validate_register_model(args: dict[str, Any]) -> dict[str, Any]:
     try:
         from autoemu.validators.register_validator import validate_register_block
@@ -650,7 +633,7 @@ ALL_TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="generate_model_bundle",
         description=(
-            "Assemble a peripheral model from step outputs, generate QEMU and harness "
+            "Assemble a peripheral model from step outputs, generate QEMU "
             "artifacts, and emit a validation report."
         ),
         parameters={
@@ -692,15 +675,6 @@ ALL_TOOLS: list[ToolSpec] = [
         ),
         parameters={"peripheral_json": str, "output_dir": str},
         handler=_generate_qemu_peripheral,
-    ),
-    ToolSpec(
-        name="generate_test_harness",
-        description=(
-            "Generate a test harness for validating a peripheral model "
-            "against driver behavior."
-        ),
-        parameters={"peripheral_json": str, "driver_analysis_json": str, "output_dir": str},
-        handler=_generate_test_harness,
     ),
     ToolSpec(
         name="validate_register_model",

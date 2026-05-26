@@ -115,8 +115,17 @@ def parse_device_tree_string(
 def infer_mmio_region_from_device_trees(
     documentation_paths: Iterable[str | Path],
     peripheral_name: str,
+    target_mcu: str = "",
 ) -> dict[str, Any]:
-    """Return the first DTS/DTSI MMIO region matching *peripheral_name*."""
+    """Return the best DTS/DTSI MMIO region matching *peripheral_name*.
+
+    When *target_mcu* is provided, DTS files whose stem matches the MCU
+    (e.g. ``hi3660`` for ``hikey960``) are preferred over unrelated SoC
+    files (e.g. ``hi6220.dtsi``).
+    """
+    matches: list[dict[str, Any]] = []
+    mcu_slug = _normalize(target_mcu)
+
     for path in documentation_paths:
         candidate = Path(path)
         if candidate.suffix.lower() not in _DT_SUFFIXES:
@@ -126,13 +135,35 @@ def infer_mmio_region_from_device_trees(
             base = info.get("base_address")
             if base is None:
                 continue
-            return {
+            # Score: higher is better.
+            # +2 if the DTS file stem contains the MCU slug
+            # +1 if the DTS file stem contains the peripheral slug
+            score = 0
+            stem = _normalize(candidate.stem)
+            if mcu_slug and mcu_slug in stem:
+                score += 2
+            periph_slug = _normalize(peripheral_name)
+            if periph_slug and periph_slug in stem:
+                score += 1
+            matches.append({
                 "base_address": base,
                 "address_size": info.get("size", 0),
                 "node": node_name,
                 "source": str(candidate),
-            }
-    return {}
+                "score": score,
+            })
+
+    if not matches:
+        return {}
+
+    matches.sort(key=lambda m: m["score"], reverse=True)
+    best = matches[0]
+    return {
+        "base_address": best["base_address"],
+        "address_size": best["address_size"],
+        "node": best["node"],
+        "source": best["source"],
+    }
 
 
 def apply_mmio_region_to_register_blocks(

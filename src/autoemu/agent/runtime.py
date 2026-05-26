@@ -30,7 +30,6 @@ from autoemu.validators.compile_validator import (
 logger = logging.getLogger(__name__)
 
 SUPPORTED_AGENT_BACKENDS = {
-    "harness",
     "claude-sdk",
     "codex-sdk",
     "anthropic-api",
@@ -91,14 +90,6 @@ def _build_test_commands(
     commands: list[str] = []
     out = Path(output_dir)
 
-    # Standalone test harness
-    test_files = [f for f in generated_files if Path(f).name.startswith("test_") and f.endswith(".c")]
-    for tf in test_files:
-        basename = Path(tf).name
-        exe = basename.replace(".c", "")
-        commands.append("# Run standalone test harness")
-        commands.append(f"cc {tf} -o {out / exe} && {out / exe}")
-
     # Compile validation against QEMU headers
     c_files = [f for f in generated_files if f.endswith(".c") and not Path(f).name.startswith("qtest_")]
     if c_files:
@@ -148,7 +139,7 @@ class AgentRuntimeConfig:
     Resolution order: environment variables → .autoemu.toml in CWD → defaults.
     """
 
-    backend: str = "harness"
+    backend: str = "codex-sdk"
     model: str | None = None
     max_budget_usd: float = 5.0
     anthropic_api_key: str = ""
@@ -172,8 +163,8 @@ class AgentRuntimeConfig:
             return agent_cfg.get(file_key, default)
 
         backend = str(
-            _setting("backend", "AUTOEMU_AGENT_BACKEND", "harness")
-        ).strip().lower() or "harness"
+            _setting("backend", "AUTOEMU_AGENT_BACKEND", "codex-sdk")
+        ).strip().lower() or "codex-sdk"
         if backend not in SUPPORTED_AGENT_BACKENDS:
             raise ValueError(
                 "AUTOEMU_AGENT_BACKEND must be one of: "
@@ -624,42 +615,40 @@ class AutoEmuAgentRuntime:
             "success": len(fetch_result.downloaded) > 0,
         }
 
-        # If an agent backend is configured, try to enhance fetch via AI
-        if self.config.backend != "harness":
-            try:
-                _log("Enhancing search with AI agent ...", "agent_thinking")
-                orchestrator = AutoEmuOrchestrator(
-                    backend=self.config.backend,
-                    model=self.config.model,
-                    max_budget_usd=self.config.max_budget_usd,
-                )
+        try:
+            _log("Enhancing search with AI agent ...", "agent_thinking")
+            orchestrator = AutoEmuOrchestrator(
+                backend=self.config.backend,
+                model=self.config.model,
+                max_budget_usd=self.config.max_budget_usd,
+            )
 
-                def _on_fetch_event(etype: str, phase: str, detail: str) -> None:
-                    _emit_agent_event(_log, etype, phase, detail)
+            def _on_fetch_event(etype: str, phase: str, detail: str) -> None:
+                _emit_agent_event(_log, etype, phase, detail)
 
-                agent_result = _run_async_factory_with_retry(
-                    lambda: orchestrator.fetch_input_data(
-                        FetchTask(
-                            target_mcu=target_mcu,
-                            target_peripheral=target_peripheral,
-                            output_dir=output_dir,
-                        ),
-                        on_event=_on_fetch_event,
+            agent_result = _run_async_factory_with_retry(
+                lambda: orchestrator.fetch_input_data(
+                    FetchTask(
+                        target_mcu=target_mcu,
+                        target_peripheral=target_peripheral,
+                        output_dir=output_dir,
                     ),
-                    max_retries=3,
-                    delay=1.0,
-                )
-                if agent_result.error:
-                    agent_error = _sanitize_agent_error(agent_result.error)
-                    _log(f"Agent fetch failed: {agent_error}", "warn")
-                    base_result["agent_error"] = agent_error
-                else:
-                    _log("Agent fetch completed", "agent_text")
-                    base_result["agent_messages"] = agent_result.agent_messages
-            except Exception as exc:
-                agent_error = _sanitize_agent_error(str(exc))
-                _log(f"Agent fetch unavailable: {agent_error}", "warn")
+                    on_event=_on_fetch_event,
+                ),
+                max_retries=3,
+                delay=1.0,
+            )
+            if agent_result.error:
+                agent_error = _sanitize_agent_error(agent_result.error)
+                _log(f"Agent fetch failed: {agent_error}", "warn")
                 base_result["agent_error"] = agent_error
+            else:
+                _log("Agent fetch completed", "agent_text")
+                base_result["agent_messages"] = agent_result.agent_messages
+        except Exception as exc:
+            agent_error = _sanitize_agent_error(str(exc))
+            _log(f"Agent fetch unavailable: {agent_error}", "warn")
+            base_result["agent_error"] = agent_error
 
         return base_result
 
@@ -688,9 +677,9 @@ class AutoEmuAgentRuntime:
                     import shutil
                     shutil.rmtree(item)
 
-        # Always run the local harness pipeline first (gracefully skip if no inputs)
+        # Run the local pipeline first (gracefully skip if no inputs)
         try:
-            harness_result = run_target_model_pipeline(
+            build_result = run_target_model_pipeline(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 data_dir=data_dir,
@@ -698,9 +687,9 @@ class AutoEmuAgentRuntime:
                 qemu_src=self.config.qemu_src,
             )
         except ValueError as exc:
-            # No SVD/headers/drivers fetched yet — skip harness and rely on agent
-            _log(f"Harness skipped: {exc}", "warn")
-            harness_result = {
+            # No SVD/headers/drivers fetched yet — skip local pipeline and rely on agent
+            _log(f"Local pipeline skipped: {exc}", "warn")
+            build_result = {
                 "target_mcu": target_mcu,
                 "target_peripheral": target_peripheral,
                 "generated_files": [],
@@ -708,63 +697,61 @@ class AutoEmuAgentRuntime:
                 "skipped": True,
             }
 
-        # If an agent backend is configured, try to enhance with AI
-        if self.config.backend != "harness":
-            inputs = resolve_fetched_input_bundle(
-                target_mcu=target_mcu,
-                target_peripheral=target_peripheral,
-                data_dir=data_dir,
+        inputs = resolve_fetched_input_bundle(
+            target_mcu=target_mcu,
+            target_peripheral=target_peripheral,
+            data_dir=data_dir,
+        )
+        try:
+            _log("Enhancing model with AI agent ...", "agent_thinking")
+            orchestrator = AutoEmuOrchestrator(
+                backend=self.config.backend,
+                model=self.config.model,
+                max_budget_usd=self.config.max_budget_usd,
             )
-            try:
-                _log("Enhancing model with AI agent ...", "agent_thinking")
-                orchestrator = AutoEmuOrchestrator(
-                    backend=self.config.backend,
-                    model=self.config.model,
-                    max_budget_usd=self.config.max_budget_usd,
+
+            def _on_build_event(etype: str, phase: str, detail: str) -> None:
+                _emit_agent_event(_log, etype, phase, detail)
+
+            model_kwargs: dict[str, Any] = {"on_event": _on_build_event}
+            model_sig = inspect.signature(orchestrator.model_peripheral)
+            if (
+                "phase_delay_seconds" in model_sig.parameters
+                or any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in model_sig.parameters.values()
                 )
+            ):
+                model_kwargs["phase_delay_seconds"] = self.config.agent_phase_delay
 
-                def _on_build_event(etype: str, phase: str, detail: str) -> None:
-                    _emit_agent_event(_log, etype, phase, detail)
-
-                model_kwargs: dict[str, Any] = {"on_event": _on_build_event}
-                model_sig = inspect.signature(orchestrator.model_peripheral)
-                if (
-                    "phase_delay_seconds" in model_sig.parameters
-                    or any(
-                        param.kind == inspect.Parameter.VAR_KEYWORD
-                        for param in model_sig.parameters.values()
-                    )
-                ):
-                    model_kwargs["phase_delay_seconds"] = self.config.agent_phase_delay
-
-                result = _run_async_factory_with_retry(
-                    lambda: orchestrator.model_peripheral(
-                        ModelingTask(
-                            peripheral_name=target_peripheral,
-                            mcu_family=infer_stm32_mcu_family(target_mcu),
-                            target_mcu=target_mcu,
-                            svd_path=inputs.svd_path,
-                            header_path=inputs.header_path,
-                            driver_paths=list(inputs.driver_paths),
-                            output_dir=output_dir,
-                            data_dir=data_dir,
-                        ),
-                        **model_kwargs,
+            result = _run_async_factory_with_retry(
+                lambda: orchestrator.model_peripheral(
+                    ModelingTask(
+                        peripheral_name=target_peripheral,
+                        mcu_family=infer_stm32_mcu_family(target_mcu),
+                        target_mcu=target_mcu,
+                        svd_path=inputs.svd_path,
+                        header_path=inputs.header_path,
+                        driver_paths=list(inputs.driver_paths),
+                        output_dir=output_dir,
+                        data_dir=data_dir,
                     ),
-                    max_retries=3,
-                    delay=1.0,
-                )
-                if result.error:
-                    agent_error = _sanitize_agent_error(result.error)
-                    _log(f"Agent build failed: {agent_error}", "warn")
-                    harness_result["agent_error"] = agent_error
-                else:
-                    _log("Agent enhancement completed", "agent_text")
-                    harness_result["agent_messages"] = result.agent_messages
-            except Exception as exc:
-                agent_error = _sanitize_agent_error(str(exc))
-                _log(f"Agent build unavailable, using harness output: {agent_error}", "warn")
-                harness_result["agent_error"] = agent_error
+                    **model_kwargs,
+                ),
+                max_retries=3,
+                delay=1.0,
+            )
+            if result.error:
+                agent_error = _sanitize_agent_error(result.error)
+                _log(f"Agent build failed: {agent_error}", "warn")
+                build_result["agent_error"] = agent_error
+            else:
+                _log("Agent enhancement completed", "agent_text")
+                build_result["agent_messages"] = result.agent_messages
+        except Exception as exc:
+            agent_error = _sanitize_agent_error(str(exc))
+            _log(f"Agent build unavailable, using local output: {agent_error}", "warn")
+            build_result["agent_error"] = agent_error
 
         # If the agent extracted a better register model (e.g. correct base address)
         # but the generate phase failed, regenerate the bundle from the agent model
@@ -825,12 +812,12 @@ class AutoEmuAgentRuntime:
                         mcu_family=infer_stm32_mcu_family(target_mcu),
                         qemu_src=self.config.qemu_src,
                     )
-                    harness_result["generated_files"] = bundle["generated_files"]
+                    build_result["generated_files"] = bundle["generated_files"]
                     _log("Bundle regenerated from agent model", "agent_text")
             except Exception as e:
                 _log(f"Could not regenerate bundle from agent model: {e}", "warn")
 
-        return harness_result
+        return build_result
 
     def _do_validate(
         self,

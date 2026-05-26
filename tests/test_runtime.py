@@ -44,7 +44,7 @@ def test_cli_help():
 # ---------------------------------------------------------------------------
 
 
-def test_runtime_config_defaults_to_harness(monkeypatch):
+def test_runtime_config_defaults_to_codex_sdk(monkeypatch):
     monkeypatch.delenv("AUTOEMU_AGENT_BACKEND", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MODEL", raising=False)
     monkeypatch.delenv("AUTOEMU_AGENT_MAX_BUDGET_USD", raising=False)
@@ -53,7 +53,7 @@ def test_runtime_config_defaults_to_harness(monkeypatch):
 
     config = AgentRuntimeConfig.load()
 
-    assert config.backend == "harness"
+    assert config.backend == "codex-sdk"
     assert config.model is None
     assert config.max_budget_usd == 5.0
 
@@ -246,8 +246,8 @@ def test_run_pipeline_fails_when_validation_fails(monkeypatch):
     assert result.validation_result["success"] is False
 
 
-def test_run_pipeline_falls_back_on_agent_errors_when_harness_valid(monkeypatch):
-    """Configured agent failures should not fail a valid deterministic harness run."""
+def test_run_pipeline_falls_back_on_agent_errors_when_local_valid(monkeypatch):
+    """Configured agent failures should not fail a valid deterministic local run."""
 
     def fake_do_fetch(self, **kwargs):
         return {"success": True, "downloaded": [{"file": "driver.c"}]}
@@ -373,8 +373,8 @@ def test_do_fetch_records_agent_fetch_error(monkeypatch, tmp_path):
     assert result["agent_error"] == "codex-app-server-sdk is not installed"
 
 
-def test_do_build_records_agent_build_error_without_discarding_harness_output(monkeypatch, tmp_path):
-    """Agent build failures should be explicit while preserving harness artifacts."""
+def test_do_build_records_agent_build_error_without_discarding_local_output(monkeypatch, tmp_path):
+    """Agent build failures should be explicit while preserving local artifacts."""
 
     class FakeOrchestrator:
         def __init__(self, **kwargs):

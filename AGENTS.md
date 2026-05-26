@@ -2,10 +2,10 @@
 
 ## Project Purpose
 
-AutoEmu is a harness-first framework for generating QEMU-compatible peripheral
-models from target MCU/board and peripheral inputs. The deterministic local
-pipeline is the primary implementation; agent backends are optional helpers for
-source collection and model enrichment.
+AutoEmu is a framework for generating QEMU-compatible peripheral models from
+target MCU/board and peripheral inputs. The deterministic local pipeline is the
+primary implementation; agent backends are optional helpers for source collection
+and model enrichment.
 
 ## Commands
 
@@ -25,7 +25,6 @@ The CLI entry point is `autoemu`, which launches the Textual TUI from
 Create `.autoemu.toml` in the working directory, or use environment variables.
 Valid agent backend names are:
 
-- `harness`
 - `claude-sdk`
 - `codex-sdk`
 - `anthropic-api`
@@ -40,7 +39,7 @@ SDK backend. Do not use old aliases such as `claude`, `codex`, or `openai`.
 - `src/autoemu/fetchers/`: web discovery, download, cache, input resolution.
 - `src/autoemu/parsers/`: SVD/header/driver parsing and register extraction.
 - `src/autoemu/inference/`: state machine, interrupt, and dependency inference.
-- `src/autoemu/generators/`: QEMU C/H, Meson, QTest, standalone, and fuzz output.
+- `src/autoemu/generators/`: QEMU C/H, Meson, and QTest output.
 - `src/autoemu/validators/`: register, behavior, compile, replay, and security checks.
 - `src/autoemu/platforms/`: STM32, MIPS, and generic platform plugins.
 
@@ -68,13 +67,13 @@ and generators must not grow board-specific or GPU-family-specific branches.
 - Hardware identity confirmation is metadata only. It may record names,
   architecture family, hardware generation, and evidence, but it must not add
   hardware-specific logic to the codebase.
-- Agent backend failures must fall back to the deterministic harness output
+- Agent backend failures must fall back to the deterministic local output
   whenever local inputs are sufficient.
 - Generated QEMU code targets latest upstream QEMU. Use
   `device_class_set_legacy_reset()`, `OBJECT_DECLARE_SIMPLE_TYPE`,
   `MemoryRegionOps`, Meson, QTest, and bare VMSTATE field names.
-- Include `hw/core/sysbus.h` for `SysBusDevice` access.
-- Include `hw/core/qdev-properties.h` for `DeviceClass` access.
+- Include `hw/sysbus.h` for `SysBusDevice` access (QEMU 9.2 compatible).
+- Include `hw/qdev-properties.h` for `DeviceClass` access (QEMU 9.2 compatible).
 
 ## 2026-05-20 Handoff Notes
 

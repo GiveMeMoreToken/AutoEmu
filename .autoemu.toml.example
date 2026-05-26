@@ -3,14 +3,13 @@
 # Resolution order: environment variables → .autoemu.toml → defaults.
 
 [agent]
-# Backend driver.  The deterministic harness runs first regardless;
+# Backend driver.  The deterministic local pipeline runs first regardless;
 # the agent backend is only an optional enhancer.
-#   "harness"      – no AI, use only local parsers and generators (default)
 #   "claude-sdk"   – Claude Agent SDK (MCP-based tool calling)
-#   "codex-sdk"    – OpenAI Codex CLI app-server SDK
+#   "codex-sdk"    – OpenAI Codex CLI app-server SDK (default)
 #   "anthropic-api"– Direct Anthropic API (no SDK)
 #   "openai-api"   – Direct OpenAI API (no SDK)
-backend = "harness"
+backend = "codex-sdk"
 
 # LLM model identifier (backend-specific).
 # Examples: "claude-sonnet-4-20250514", "gpt-5.5", "o3"

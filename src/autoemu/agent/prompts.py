@@ -118,7 +118,7 @@ The code must:
 - Include hw/qdev-properties.h for DeviceClass access
 - Include qemu/timer.h whenever qemu_clock_get_ns(), timer_new_ns(), or any
   QEMU_CLOCK_* constant is used (do NOT rely on transitive includes)
-- Name QTest harness files with the qtest_ prefix (e.g. qtest_hikey960_gpu.c)
+- Name QTest files with the qtest_ prefix (e.g. qtest_hikey960_gpu.c)
   so that the validator can skip them; they require a full QEMU build tree
 - Follow QEMU coding style (4-space indent, snake_case)
 - Generate meson.build snippet for Meson build integration

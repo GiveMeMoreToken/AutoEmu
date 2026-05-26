@@ -324,7 +324,7 @@ def validate_compile(
         if path.suffix not in (".c", ".h"):
             continue
 
-        # QTest files need the full QEMU test harness; skip silently.
+        # QTest files need the full QEMU test framework; skip silently.
         if path.name.startswith("qtest_"):
             continue
         if path.suffix == ".c":

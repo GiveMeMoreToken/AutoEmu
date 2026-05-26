@@ -12,9 +12,6 @@ from autoemu.generators.qemu_generator import (
     generate_peripheral_code,
     QEMU_TARGET_VERSION,
 )
-from autoemu.generators.test_generator import generate_test_harness
-
-
 def _make_test_peripheral() -> Peripheral:
     return Peripheral(
         name="TEST_PERIPH",
@@ -102,8 +99,8 @@ class TestQEMUGenerator:
 
             assert "latest upstream QEMU" in content
             assert "TYPE_STM32F4_TEST_PERIPH" in content
-            assert 'hw/core/sysbus.h' in content
-            assert 'hw/sysbus.h' not in content
+            assert 'hw/sysbus.h' in content
+            assert 'hw/core/sysbus.h' not in content
             assert "TEST_PERIPH_CR_OFFSET" in content
             assert "TEST_PERIPH_SR_OFFSET" in content
             assert "MemoryRegion mmio" in content
@@ -130,8 +127,8 @@ class TestQEMUGenerator:
             assert "dc->reset" not in content
 
             # DeviceClass access in latest QEMU requires hw/core/qdev-properties.h
-            assert 'hw/core/qdev-properties.h' in content
-            assert 'hw/qdev-properties.h' not in content
+            assert 'hw/qdev-properties.h' in content
+            assert 'hw/core/qdev-properties.h' not in content
 
             # VMSTATE uses bare field names (not s->field)
             assert "VMSTATE_UINT32(cr," in content
@@ -184,19 +181,3 @@ class TestQEMUGenerator:
             assert "s-> &" not in content
 
 
-class TestTestGenerator:
-    def test_generates_test_file(self):
-        periph = _make_test_peripheral()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files = generate_test_harness(periph, tmpdir)
-            assert len(files) == 1
-            assert files[0].endswith(".c")
-
-    def test_test_content(self):
-        periph = _make_test_peripheral()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files = generate_test_harness(periph, tmpdir)
-            content = Path(files[0]).read_text()
-            assert "test_reset_values" in content
-            assert "test_w1c_behavior" in content
-            assert "int main" in content

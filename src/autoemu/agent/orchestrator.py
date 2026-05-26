@@ -368,7 +368,7 @@ class AutoEmuOrchestrator:
         transport crash), that phase is retried up to 2 times without
         restarting earlier phases.  After retries are exhausted the phase is
         skipped when *skip_on_failure* is True so that later phases can still
-        run using the deterministic harness output already on disk.
+        run using the deterministic local output already on disk.
         """
         result = ModelingResult(peripheral_name=task.peripheral_name)
         total_cost = 0.0

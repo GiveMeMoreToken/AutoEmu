@@ -33,6 +33,7 @@ def run_model_pipeline(
     driver_paths: Iterable[str | Path] = (),
     documentation_paths: Iterable[str | Path] = (),
     mcu_family: str = "",
+    target_mcu: str = "",
     qemu_src: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run steps 1-5 and emit an end-to-end QEMU-ready peripheral bundle."""
@@ -59,6 +60,7 @@ def run_model_pipeline(
         mmio_region=infer_mmio_region_from_device_trees(
             doc_path_list,
             peripheral_name,
+            target_mcu=target_mcu or mcu_family,
         ),
     )
     register_path = _write_json(
@@ -168,6 +170,7 @@ def run_target_model_pipeline(
         driver_paths=inputs.driver_paths,
         documentation_paths=inputs.documentation_paths,
         mcu_family=infer_stm32_mcu_family(target_mcu),
+        target_mcu=target_mcu,
         qemu_src=qemu_src,
     )
     result["target_mcu"] = target_mcu
