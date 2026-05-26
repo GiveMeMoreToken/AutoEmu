@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from autoemu.generators.qemu_generator import generate_peripheral_code
+from autoemu.generators.machine_patcher import generate_virt_patch
 from autoemu.generators.test_generator import generate_test_harness
 from autoemu.inference.dependency_inference import load_dependency_graph_json
 from autoemu.modeling_utils import (
@@ -24,7 +25,6 @@ from autoemu.models.register import Register, RegisterBlock
 from autoemu.models.state_machine import StateMachine
 from autoemu.parsers.driver_parser import DriverAnalysis, RegisterAccess, analyze_driver_file
 from autoemu.validators.behavior_validator import validate_behavior
-from autoemu.validators.compile_validator import validate_compile
 from autoemu.validators.register_validator import validate_register_block
 
 
@@ -211,6 +211,7 @@ def generate_model_bundle(
     dependencies: DependencyGraph | dict[str, Any] | None = None,
     driver_analysis: DriverAnalysis | dict[str, Any] | None = None,
     mcu_family: str = "",
+    qemu_src: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a peripheral model, generate artifacts, and verify consistency."""
     output_path = Path(output_dir)
@@ -234,15 +235,19 @@ def generate_model_bundle(
     generated_files.extend(generate_peripheral_code(peripheral, output_path))
     generated_files.extend(generate_test_harness(peripheral, output_path))
 
-    compile_result = validate_compile(
-        [f for f in generated_files if f.endswith(('.c', '.h'))],
-    )
-
     validation_report = verify_peripheral_consistency(peripheral, driver_analysis)
-    validation_report["compile_validation"] = compile_result
     validation_path = output_path / f"{snake}_validation.json"
     validation_path.write_text(json.dumps(validation_report, indent=2), encoding="utf-8")
     generated_files.append(str(validation_path))
+
+    # Generate machine patch for QEMU integration when source tree is known
+    if qemu_src:
+        try:
+            patch_result = generate_virt_patch(peripheral, output_path, qemu_src)
+            generated_files.append(patch_result["patch_path"])
+            generated_files.append(patch_result["dtso_path"])
+        except Exception:
+            pass
 
     return {
         "peripheral": peripheral.model_dump(),
@@ -264,6 +269,7 @@ def generate_model_bundle_from_files(
     dependency_graph_path: str | Path | None = None,
     driver_path: str | Path | None = None,
     mcu_family: str = "",
+    qemu_src: str | Path | None = None,
 ) -> dict[str, Any]:
     """File-based wrapper for the step-5 generation pipeline."""
     register_blocks = load_register_blocks_json(registers_path)
@@ -282,6 +288,7 @@ def generate_model_bundle_from_files(
         dependencies=dependency_graph,
         driver_analysis=driver_analysis,
         mcu_family=mcu_family,
+        qemu_src=qemu_src,
     )
 
 

@@ -18,8 +18,8 @@ Target platform: {QEMU_TARGET_VERSION}
 - Use OBJECT_DECLARE_SIMPLE_TYPE for type declarations
 - Use Meson build system (not Makefile.objs)
 - Use QTest framework for in-tree peripheral testing
-- Include hw/core/sysbus.h for SysBusDevice access
-- Include hw/core/qdev-properties.h for DeviceClass access
+- Include hw/sysbus.h for SysBusDevice access
+- Include hw/qdev-properties.h for DeviceClass access
 - VMSTATE macros take bare field names (not s->field)
 
 You have access to tools for:
@@ -59,7 +59,8 @@ For each register, identify:
 - Special behaviors (W1C flags, read-clear status bits, etc.)
 
 Prefer the merged register extraction path when both SVD and CMSIS header data are available.
-Output the structured register model.
+Use ONLY the available tools to build and save the register model. Do NOT write the JSON
+inline in your response — tool calls are faster and avoid timeouts.
 """
 
 BEHAVIOR_INFERENCE_PROMPT = """\
@@ -85,7 +86,8 @@ Analyze the interrupt model for peripheral '{peripheral_name}':
 - Map NVIC IRQ numbers
 
 Prefer the automatic interrupt inference path after driver analysis and register extraction.
-Output the complete interrupt model.
+Use ONLY the available tools to build and save the interrupt model. Do NOT write the JSON
+inline in your response — tool calls are faster and avoid timeouts.
 """
 
 DEPENDENCY_ANALYSIS_PROMPT = """\
@@ -112,8 +114,8 @@ The code must:
 - Wire up IRQ outputs via qemu_set_irq
 - Use device_class_set_legacy_reset() for reset (NOT dc->reset)
 - Use bare field names in VMSTATE macros (NOT s->field)
-- Include hw/core/sysbus.h (not hw/sysbus.h)
-- Include hw/core/qdev-properties.h (not hw/qdev-properties.h)
+- Include hw/sysbus.h for SysBusDevice access
+- Include hw/qdev-properties.h for DeviceClass access
 - Include qemu/timer.h whenever qemu_clock_get_ns(), timer_new_ns(), or any
   QEMU_CLOCK_* constant is used (do NOT rely on transitive includes)
 - Name QTest harness files with the qtest_ prefix (e.g. qtest_hikey960_gpu.c)

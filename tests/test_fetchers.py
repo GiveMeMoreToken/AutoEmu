@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 from autoemu.agent.prompts import build_system_prompt
 from autoemu.agent.runtime import _cleanup_stale_files
@@ -66,6 +67,19 @@ def test_generic_fetcher_discover_scores_candidates():
     # Higher-scored candidates come first
     scores = [c.score for c in candidates]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_generic_fetcher_discover_keeps_completed_candidates_on_timeout():
+    class SlowSearcher(FakeSearcher):
+        def search(self, query: str, *, max_results: int = 8):
+            time.sleep(0.05)
+            return []
+
+    fetcher = GenericDataFetcher(searcher=SlowSearcher([]), search_timeout=0.01)
+    candidates = fetcher.discover_candidates("Hikey960", "GPU")
+
+    assert any(candidate.url.endswith("panfrost_device.c") for candidate in candidates)
+    assert any(candidate.url.endswith("panfrost_regs.h") for candidate in candidates)
 
 
 def test_resolve_fetched_input_bundle_from_manifest(tmp_path):

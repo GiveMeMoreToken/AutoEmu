@@ -191,22 +191,23 @@ def _generate_reg_write(peripheral: Peripheral, pfx: str) -> str:
                     case _:
                         rw_mask |= f.mask
 
-            if ro_mask:
-                lines.append("        /* Preserve read-only bits */")
-                lines.append(f"        uint32_t new_val = old & 0x{ro_mask:08X}U;")
-            else:
-                lines.append("        uint32_t new_val = 0;")
+            lines.append("        uint32_t new_val = old;")
 
             if rw_mask:
-                lines.append(f"        new_val |= value & 0x{rw_mask:08X}U;")
+                lines.append("        /* Read-write bits */")
+                lines.append(f"        new_val = (new_val & ~0x{rw_mask:08X}U) | (value & 0x{rw_mask:08X}U);")
 
             if w1c_mask:
                 lines.append("        /* Write-1-to-clear bits */")
-                lines.append(f"        new_val |= old & ~(value & 0x{w1c_mask:08X}U) & 0x{w1c_mask:08X}U;")
+                lines.append(f"        new_val &= ~(value & 0x{w1c_mask:08X}U);")
 
             if w1s_mask:
                 lines.append("        /* Write-1-to-set bits */")
-                lines.append(f"        new_val |= (old | value) & 0x{w1s_mask:08X}U;")
+                lines.append(f"        new_val |= (value & 0x{w1s_mask:08X}U);")
+
+            if ro_mask:
+                lines.append("        /* Preserve read-only bits */")
+                lines.append(f"        new_val = (new_val & ~0x{ro_mask:08X}U) | (old & 0x{ro_mask:08X}U);")
 
             lines.append(f"        s->{reg.name.lower()} = new_val;")
             lines.append(f"        {pfx}_{snake}_update_irq(s);")
@@ -244,7 +245,7 @@ def _generate_source(peripheral: Peripheral) -> str:
         " */",
         "",
         "#include \"qemu/osdep.h\"",
-        f"#include \"hw/{pfx}_{snake}.h\"",
+        f"#include \"{pfx}_{snake}.h\"",
         "#include \"hw/core/qdev-properties.h\"",
         "#include \"qemu/log.h\"",
         "#include \"migration/vmstate.h\"",
@@ -368,6 +369,7 @@ def _generate_source(peripheral: Peripheral) -> str:
     lines.append("")
     lines.append(f"    device_class_set_legacy_reset(dc, {pfx}_{snake}_reset);")
     lines.append(f"    dc->vmsd = &vmstate_{pfx}_{snake};")
+    lines.append("    dc->user_creatable = true;")
     lines.append("}")
     lines.append("")
 
@@ -445,7 +447,7 @@ def _generate_qtest(peripheral: Peripheral) -> str:
     # Test: reset values
     lines.append(f"static void test_{snake}_reset(void)")
     lines.append("{")
-    lines.append("    QTestState *s = qtest_init(\"-machine none\");")
+    lines.append(f'    QTestState *s = qtest_init("-machine virt -device {pfx}-{snake}");')
     lines.append("")
     for reg in peripheral.register_block.registers:
         if reg.access.value != "WO":
@@ -466,7 +468,7 @@ def _generate_qtest(peripheral: Peripheral) -> str:
         reg = rw_regs[0]
         lines.append(f"static void test_{snake}_write_read(void)")
         lines.append("{")
-        lines.append("    QTestState *s = qtest_init(\"-machine none\");")
+        lines.append(f'    QTestState *s = qtest_init("-machine virt -device {pfx}-{snake}");')
         lines.append("")
         lines.append(f"    qtest_writel(s, {upper}_REG({upper}_{reg.name}_OFFSET), 0xDEADBEEFU);")
         lines.append(f"    g_assert_cmphex(qtest_readl(s, {upper}_REG({upper}_{reg.name}_OFFSET)), "
@@ -486,7 +488,7 @@ def _generate_qtest(peripheral: Peripheral) -> str:
             f = w1c_fields[0]
             lines.append(f"static void test_{snake}_w1c(void)")
             lines.append("{")
-            lines.append("    QTestState *s = qtest_init(\"-machine none\");")
+            lines.append(f'    QTestState *s = qtest_init("-machine virt -device {pfx}-{snake}");')
             lines.append("")
             lines.append("    /* Read status register and write 1 to clear a flag */")
             lines.append(f"    uint32_t val = qtest_readl(s, "
@@ -508,7 +510,7 @@ def _generate_qtest(peripheral: Peripheral) -> str:
         reg = ro_regs[0]
         lines.append(f"static void test_{snake}_readonly(void)")
         lines.append("{")
-        lines.append("    QTestState *s = qtest_init(\"-machine none\");")
+        lines.append(f'    QTestState *s = qtest_init("-machine virt -device {pfx}-{snake}");')
         lines.append("")
         lines.append(f"    uint32_t before = qtest_readl(s, "
                      f"{upper}_REG({upper}_{reg.name}_OFFSET));")

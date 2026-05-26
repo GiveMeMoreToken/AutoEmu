@@ -264,6 +264,12 @@ class AutoEmuApp(App):
                     placeholder="e.g. ETH, GPU, USB, SPI, UART",
                     id="input-peripheral",
                 )
+            with Horizontal(classes="form-row"):
+                yield Label("Target CVE (optional):")
+                yield Input(
+                    placeholder="e.g. CVE-2021-12345",
+                    id="input-cve",
+                )
 
         with Container(id="action-bar"):
             yield Button("Run Pipeline  [dim](Ctrl+R)[/]", variant="primary", id="btn-run")
@@ -348,6 +354,7 @@ class AutoEmuApp(App):
     def action_run_pipeline(self) -> None:
         mcu = self.query_one("#input-mcu", Input).value.strip()
         periph = self.query_one("#input-peripheral", Input).value.strip()
+        cve = self.query_one("#input-cve", Input).value.strip()
         log = self.query_one("#log", LogPanel)
 
         if not mcu or not periph:
@@ -356,10 +363,10 @@ class AutoEmuApp(App):
 
         btn = self.query_one("#btn-run", Button)
         btn.disabled = True
-        self._run_pipeline_worker(mcu, periph)
+        self._run_pipeline_worker(mcu, periph, cve)
 
     @work(thread=True)
-    def _run_pipeline_worker(self, mcu: str, periph: str) -> None:
+    def _run_pipeline_worker(self, mcu: str, periph: str, cve_id: str = "") -> None:
         from autoemu.agent.runtime import AutoEmuAgentRuntime, PipelineProgress
 
         log = self.query_one("#log", LogPanel)
@@ -369,6 +376,8 @@ class AutoEmuApp(App):
         self.app.call_from_thread(log.clear_log_buffer)
 
         log.log_info(f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
+        if cve_id:
+            log.log_info(f"CVE target: [bold]{cve_id}[/]")
 
         def on_progress(p: PipelineProgress) -> None:
             if p.error:
@@ -385,6 +394,7 @@ class AutoEmuApp(App):
             result = runtime.run_pipeline(
                 target_mcu=mcu,
                 target_peripheral=periph,
+                cve_id=cve_id,
                 on_progress=on_progress,
             )
 
@@ -415,6 +425,14 @@ class AutoEmuApp(App):
                 if len(result.generated_files) > 20:
                     log.write(f"  ... and {len(result.generated_files) - 20} more")
 
+            if result.test_commands:
+                log.log_info("Test and validation commands:")
+                for cmd in result.test_commands:
+                    if cmd.startswith("# "):
+                        log.write(f"  [dim]{cmd}[/]")
+                    else:
+                        log.write(f"  [bold green]{cmd}[/]")
+
             val = result.validation_result
             if val:
                 checked = val.get("files_checked", 0)
@@ -425,16 +443,17 @@ class AutoEmuApp(App):
                     log.log_success(f"Validation: {checked} file(s) checked, no errors")
                 elif val.get("success") and skipped_qemu:
                     log.log_kind("Validation: compilation skipped (no QEMU source tree)", "warn")
-                elif val.get("success"):
-                    log.log_success(f"Validation: {checked} file(s) checked, no errors")
+                elif val.get("success") and warnings:
+                    log.log_kind(
+                        f"Validation: {checked} file(s) checked, {len(warnings)} warning(s)",
+                        "warn",
+                    )
                 elif errors:
                     log.log_error(f"Validation: {len(errors)} error(s) in {checked} file(s)")
                     for err in errors[:10]:
                         log.write(f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]")
                 else:
                     log.log_error(f"Validation: {checked} file(s) checked, blocking warning(s)")
-                for w in warnings:
-                    log.write(f"  [yellow]Warning: {w}[/]")
 
         except Exception as exc:
             import traceback

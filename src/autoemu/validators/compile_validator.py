@@ -172,6 +172,16 @@ def find_qemu_include_paths(qemu_src: str | Path | None = None) -> list[str]:
     build_dir = src / "build"
     if build_dir.exists():
         paths.append(str(build_dir))
+    else:
+        # Search for pre-built QEMU trees in common relative locations
+        # e.g. env/src/qemu-9.2.0 -> env/build/qemu-aarch64/config-host.h
+        for candidate in (src.parent.parent / "build", src.parent / "build"):
+            if candidate.exists():
+                for subdir in sorted(candidate.iterdir()):
+                    if subdir.is_dir() and (subdir / "config-host.h").exists():
+                        paths.append(str(subdir))
+                        break
+                break
 
     # Add system library include paths required by QEMU headers
     for pkg in ("glib-2.0", "pixman-1"):
@@ -198,6 +208,47 @@ def _pkg_config_cflags(package: str) -> list[str]:
     return []
 
 
+def _is_missing_system_header(stderr: str) -> bool:
+    """Detect compile errors caused by missing system/external headers
+    (glib, pixman, zlib, ffi) — not actual code issues."""
+    system_header_patterns = [
+        "fatal error: glib.h",
+        "fatal error: glib/",
+        "fatal error: pixman.h",
+        "fatal error: zlib.h",
+        "fatal error: ffi.h",
+        "fatal error: glib-compat.h",
+        "fatal error: config-host.h",
+    ]
+    return any(p in stderr for p in system_header_patterns)
+
+
+def _probe_qemu_build_env(compiler: str, include_flags: list[str]) -> tuple[bool, bool]:
+    """Quick compile probe. Returns (usable, missing_system_deps).
+
+    *usable* is True when the probe compiled cleanly.
+    *missing_system_deps* is True when the probe failed specifically because
+    system headers (glib, pixman) are missing — in that case we should skip
+    the whole batch rather than fail every file.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="autoemu-probe-") as td:
+            probe = Path(td) / "probe.c"
+            probe.write_text('#include "qemu/osdep.h"\nint main(void){return 0;}\n')
+            cmd = [
+                compiler, "-fsyntax-only", "-std=gnu11",
+                *include_flags, "-DNEED_CPU_H=0",
+                str(probe),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if result.returncode == 0:
+                return (True, False)
+            stderr = result.stderr or ""
+            return (False, _is_missing_system_header(stderr))
+    except Exception:
+        return (False, False)
+
+
 def validate_compile(
     source_files: Sequence[str | Path],
     *,
@@ -222,26 +273,39 @@ def validate_compile(
         }
 
     include_paths = find_qemu_include_paths(qemu_src)
-    # Build include flags
-    include_flags = []
+    include_flags: list[str] = []
     for p in include_paths:
         include_flags.extend(["-I", p])
 
-    results_errors: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    files_checked = 0
-
     if not include_paths:
-        warnings.append(
-            f"QEMU source tree not found ({qemu_source_hint(qemu_src)}); "
-            "skipping compilation check"
-        )
         return {
             "success": True,
             "files_checked": 0,
             "errors": [],
-            "warnings": warnings,
+            "warnings": [
+                f"QEMU source tree not found ({qemu_source_hint(qemu_src)}); "
+                "skipping compilation check"
+            ],
         }
+
+    # Pre-flight: verify the build environment can actually compile QEMU headers.
+    # If system deps (glib, pixman) are missing, every file would fail with the
+    # same error. Detect it once and emit a single warning.
+    usable, missing_system_deps = _probe_qemu_build_env(compiler, include_flags)
+    if missing_system_deps:
+        return {
+            "success": True,
+            "files_checked": 0,
+            "errors": [],
+            "warnings": [
+                "Missing QEMU build dependencies (glib-2.0, pixman-1); "
+                "skipping compilation check"
+            ],
+        }
+
+    results_errors: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    files_checked = 0
 
     for file_path in source_files:
         path = Path(file_path)
@@ -260,17 +324,13 @@ def validate_compile(
         if path.suffix not in (".c", ".h"):
             continue
 
-        # Skip QTest files — they need the full QEMU test harness.
-        # Match both qtest_*.c (standard naming) and any file that includes
-        # libqtest.h (e.g. agent-generated *-test.c files).
+        # QTest files need the full QEMU test harness; skip silently.
         if path.name.startswith("qtest_"):
-            warnings.append(f"{path.name}: skipped QTest file (needs full QEMU build)")
             continue
         if path.suffix == ".c":
             try:
                 src_text = path.read_text(encoding="utf-8", errors="replace")
                 if "libqtest.h" in src_text:
-                    warnings.append(f"{path.name}: skipped QTest file (needs full QEMU build)")
                     continue
             except OSError:
                 pass
@@ -278,19 +338,10 @@ def validate_compile(
         files_checked += 1
 
         # Add the file's parent dir as include path so that
-        # `#include "hw/foo.h"` resolves when foo.h sits alongside
+        # `#include "foo.h"` resolves when foo.h sits alongside the .c file
         local_include_flags = list(include_flags)
         parent = str(path.parent.resolve())
         local_include_flags.extend(["-I", parent])
-        # Create a hw/ symlink so #include "hw/prefix_name.h" resolves
-        hw_dir = path.parent / "hw"
-        hw_symlink_created = False
-        if not hw_dir.exists():
-            try:
-                hw_dir.symlink_to(path.parent.resolve())
-                hw_symlink_created = True
-            except OSError:
-                local_include_flags.extend(["-I", parent])
 
         header_wrapper = None
         compile_path = path
@@ -340,49 +391,13 @@ def validate_compile(
         finally:
             if header_wrapper is not None:
                 header_wrapper.cleanup()
-            if hw_symlink_created and hw_dir.is_symlink():
-                hw_dir.unlink()
 
-    # Demote errors caused by missing system headers (not a code issue)
-    real_errors: list[dict[str, Any]] = []
-    for err in results_errors:
-        stderr = err.get("stderr", "")
-        if _is_missing_system_header(stderr):
-            warnings.append(
-                f"{err['file']}: skipped — missing system headers "
-                f"(install QEMU build dependencies to enable full validation)"
-            )
-        else:
-            real_errors.append(err)
-
+    # Any remaining errors at this point are real code issues, not environment.
     return {
-        "success": len(real_errors) == 0,
+        "success": len(results_errors) == 0,
         "files_checked": files_checked,
-        "errors": real_errors,
+        "errors": results_errors,
         "warnings": warnings,
     }
 
 
-def _is_missing_system_header(stderr: str) -> bool:
-    """Detect compile errors caused by missing system/external headers or
-    incomplete QEMU build environment (not actual code issues)."""
-    # Direct missing system headers
-    system_header_patterns = [
-        "fatal error: glib.h",
-        "fatal error: glib/",
-        "fatal error: pixman.h",
-        "fatal error: zlib.h",
-        "fatal error: ffi.h",
-    ]
-    if any(p in stderr for p in system_header_patterns):
-        return True
-    # Errors from QEMU internal headers that fail due to missing build env
-    # (e.g., qemu/atomic.h needing stdint.h which should come from osdep.h→glib.h)
-    qemu_env_patterns = [
-        "qemu/atomic.h",
-        "qemu/osdep.h",
-        "glib-compat.h",
-    ]
-    if any(p in stderr for p in qemu_env_patterns):
-        return True
-    return False

@@ -8,7 +8,12 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlunparse
@@ -593,24 +598,44 @@ class GenericDataFetcher:
                 seen_urls.add(normalized)
                 all_candidates.append(candidate)
 
-        with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
-            futures = {
-                pool.submit(
-                    self._run_single_search, query, category, target_mcu, target_peripheral
-                ): (query, category)
-                for query, category in queries
-            }
+        pool = ThreadPoolExecutor(max_workers=min(len(queries), 5))
+        futures: dict[Future[list[SearchCandidate]], tuple[str, str]] = {
+            pool.submit(
+                self._run_single_search, query, category, target_mcu, target_peripheral
+            ): (query, category)
+            for query, category in queries
+        }
+        processed: set[Future[list[SearchCandidate]]] = set()
+
+        def _collect_future(future: Future[list[SearchCandidate]]) -> None:
+            processed.add(future)
+            try:
+                results = future.result(timeout=10)
+                for candidate in results:
+                    normalized = candidate.url.split("?")[0].rstrip("/")
+                    if normalized not in seen_urls:
+                        seen_urls.add(normalized)
+                        all_candidates.append(candidate)
+            except Exception as exc:
+                query, category = futures[future]
+                logger.warning("Search task failed for %r: %s", query, exc)
+
+        try:
             for future in as_completed(futures, timeout=self.search_timeout):
-                try:
-                    results = future.result(timeout=10)
-                    for candidate in results:
-                        normalized = candidate.url.split("?")[0].rstrip("/")
-                        if normalized not in seen_urls:
-                            seen_urls.add(normalized)
-                            all_candidates.append(candidate)
-                except Exception as exc:
-                    query, category = futures[future]
-                    logger.warning("Search task failed for %r: %s", query, exc)
+                _collect_future(future)
+        except FuturesTimeoutError as exc:
+            logger.warning(
+                "Search discovery timed out after %ss; returning completed results: %s",
+                self.search_timeout,
+                exc,
+            )
+            for future in futures:
+                if future not in processed and future.done():
+                    _collect_future(future)
+        finally:
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
         all_candidates.sort(key=lambda c: c.score, reverse=True)
         return all_candidates

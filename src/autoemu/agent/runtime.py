@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -74,8 +76,53 @@ class PipelineResult:
     build_result: dict[str, Any] = field(default_factory=dict)
     validation_result: dict[str, Any] = field(default_factory=dict)
     generated_files: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    cve_findings: dict[str, Any] = field(default_factory=dict)
     success: bool = False
     error: str = ""
+
+
+def _build_test_commands(
+    generated_files: list[str],
+    output_dir: str = "output",
+    qemu_src: str = "",
+) -> list[str]:
+    """Return actionable commands to test and validate generated artifacts."""
+    commands: list[str] = []
+    out = Path(output_dir)
+
+    # Standalone test harness
+    test_files = [f for f in generated_files if Path(f).name.startswith("test_") and f.endswith(".c")]
+    for tf in test_files:
+        basename = Path(tf).name
+        exe = basename.replace(".c", "")
+        commands.append("# Run standalone test harness")
+        commands.append(f"cc {tf} -o {out / exe} && {out / exe}")
+
+    # Compile validation against QEMU headers
+    c_files = [f for f in generated_files if f.endswith(".c") and not Path(f).name.startswith("qtest_")]
+    if c_files:
+        if qemu_src:
+            commands.append("# Validate compilation against QEMU headers")
+            commands.append(f"AUTOEMU_QEMU_SRC={qemu_src} python -m autoemu.validators.compile_validator {' '.join(c_files)}")
+        else:
+            commands.append("# Validate compilation (set AUTOEMU_QEMU_SRC to enable full QEMU header checks)")
+            commands.append(f"python -m autoemu.validators.compile_validator {' '.join(c_files)}")
+
+    # Apply to QEMU tree
+    commands.append("# Apply generated peripheral to QEMU source tree")
+    if qemu_src:
+        commands.append(f"./scripts/apply-to-qemu.py {out} --qemu-src {qemu_src}")
+    else:
+        commands.append(f"./scripts/apply-to-qemu.py {out} --qemu-src /path/to/qemu")
+
+    # QTest in-tree
+    qtest_files = [f for f in generated_files if Path(f).name.startswith("qtest_") and f.endswith(".c")]
+    if qtest_files:
+        commands.append("# Build and run QTest inside QEMU (requires in-tree placement first)")
+        commands.append("# cd <qemu-src>/build && make check-qtest-arm  # or appropriate target")
+
+    return commands
 
 
 CONFIG_FILENAME = ".autoemu.toml"
@@ -109,6 +156,7 @@ class AgentRuntimeConfig:
     openai_api_key: str = ""
     openai_base_url: str = ""
     qemu_src: str = ""
+    agent_phase_delay: float = 30.0
 
     @classmethod
     def load(cls) -> AgentRuntimeConfig:
@@ -156,6 +204,11 @@ class AgentRuntimeConfig:
             or validation_cfg.get("qemu_src", "")
         ).strip()
 
+        delay_raw = str(
+            _setting("agent_phase_delay", "AUTOEMU_AGENT_PHASE_DELAY", "")
+        ).strip()
+        agent_phase_delay = float(delay_raw) if delay_raw else 5.0
+
         # Inject into environment so SDKs pick them up
         if anthropic_key:
             os.environ["ANTHROPIC_API_KEY"] = anthropic_key
@@ -175,10 +228,68 @@ class AgentRuntimeConfig:
             openai_api_key=openai_key,
             openai_base_url=openai_base,
             qemu_src=qemu_src,
+            agent_phase_delay=agent_phase_delay,
         )
 
     # Keep the old name as alias
     from_env = load
+
+
+def _is_stdio_transport_error(msg: str) -> bool:
+    return "failed reading from stdio transport" in msg.lower()
+
+
+def _is_retryable_agent_result(result: Any) -> bool:
+    """Return True if an agent result dict/ object contains a transient stdio error."""
+    msg = ""
+    if isinstance(result, dict):
+        msg = str(result.get("agent_error", "")) + str(result.get("error", ""))
+    else:
+        msg = str(getattr(result, "error", "") or "")
+    return _is_stdio_transport_error(msg)
+
+
+def _run_async_factory_with_retry(
+    coro_factory: Callable[[], Any],
+    max_retries: int = 3,
+    delay: float = 5.0,
+) -> Any:
+    """Run a coroutine factory with retry on transient stdio transport failures.
+
+    Retries both when asyncio.run raises an exception AND when the returned
+    result object carries a retryable agent error, because the Codex backend
+    catches transport crashes internally and surfaces them as result.error.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = asyncio.run(coro_factory())
+            if _is_retryable_agent_result(result) and attempt < max_retries:
+                backoff = delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Agent returned transient error (attempt %d/%d), retrying in %.1fs ...",
+                    attempt,
+                    max_retries,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            return result
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            if _is_stdio_transport_error(msg) and attempt < max_retries:
+                backoff = delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Agent stdio transport failed (attempt %d/%d), retrying in %.1fs ...",
+                    attempt,
+                    max_retries,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    raise last_exc or RuntimeError("Agent failed after retries")
 
 
 def _cleanup_stale_files(data_dir: str, _log: Callable) -> None:
@@ -300,9 +411,10 @@ class AutoEmuAgentRuntime:
         *,
         target_mcu: str,
         target_peripheral: str,
+        cve_id: str = "",
         on_progress: Callable[[PipelineProgress], None] | None = None,
     ) -> PipelineResult:
-        """Run the full pipeline: detect → fetch → build → validate.
+        """Run the full pipeline: detect → cve (optional) → fetch → build → validate.
 
         Only *target_mcu* and *target_peripheral* are required; everything
         else (platform, directories, validation) is inferred automatically.
@@ -332,6 +444,37 @@ class AutoEmuAgentRuntime:
             data_dir = f"data/{mcu_slug}"
             output_dir = "output"
             _emit(1, f"Vendor: {board.vendor}, arch: {board.arch}, family: {board.family}")
+
+            # Optional CVE phase — validate, check relation, search PoC
+            if cve_id:
+                from autoemu.cve_validator import run_cve_check
+                _emit(1, f"Validating CVE: {cve_id} ...", "search")
+                cve_summary = run_cve_check(
+                    cve_id,
+                    peripheral_name=target_peripheral,
+                    mcu_name=target_mcu,
+                )
+                result.cve_findings = cve_summary
+                if not cve_summary["valid_format"]:
+                    _emit(1, f"CVE warning: {cve_summary['warnings'][0]}", "warn")
+                elif not cve_summary["disclosed"]:
+                    _emit(1, f"CVE warning: {cve_summary['warnings'][0]}", "warn")
+                elif not cve_summary["related"]:
+                    _emit(1, f"CVE warning: {cve_summary['warnings'][0]}", "warn")
+                else:
+                    _emit(1, f"CVE {cve_id} is related to {target_peripheral}", "info")
+                poc_count = len(cve_summary.get("poc_findings", []))
+                if poc_count:
+                    _emit(1, f"Found {poc_count} PoC / exploit / advisory reference(s)", "info")
+                # Persist findings to output for later inspection
+                try:
+                    out_path = Path(output_dir)
+                    out_path.mkdir(parents=True, exist_ok=True)
+                    (out_path / "cve_findings.json").write_text(
+                        json.dumps(cve_summary, indent=2), encoding="utf-8"
+                    )
+                except Exception:
+                    pass
 
             # Phase 2 — fetch
             _emit(2, "Searching the web for input data ...", "search")
@@ -368,6 +511,12 @@ class AutoEmuAgentRuntime:
             generated = build_result.get("generated_files", [])
             result.generated_files = generated
             _emit(3, f"Generated {len(generated)} file(s)", "agent_text")
+
+            result.test_commands = _build_test_commands(
+                generated,
+                output_dir=output_dir,
+                qemu_src=self.config.qemu_src,
+            )
 
             # Phase 4 — validate
             _emit(4, "Validating generated code ...", "compile")
@@ -488,15 +637,17 @@ class AutoEmuAgentRuntime:
                 def _on_fetch_event(etype: str, phase: str, detail: str) -> None:
                     _emit_agent_event(_log, etype, phase, detail)
 
-                agent_result = asyncio.run(
-                    orchestrator.fetch_input_data(
+                agent_result = _run_async_factory_with_retry(
+                    lambda: orchestrator.fetch_input_data(
                         FetchTask(
                             target_mcu=target_mcu,
                             target_peripheral=target_peripheral,
                             output_dir=output_dir,
                         ),
                         on_event=_on_fetch_event,
-                    )
+                    ),
+                    max_retries=3,
+                    delay=1.0,
                 )
                 if agent_result.error:
                     agent_error = _sanitize_agent_error(agent_result.error)
@@ -524,6 +675,19 @@ class AutoEmuAgentRuntime:
     ) -> dict[str, Any]:
         _log = on_progress or _noop_progress
 
+        # Clear stale artifacts from previous runs so we don't validate or
+        # report old files as "generated" this run.
+        out_path = Path(output_dir)
+        if out_path.exists():
+            for item in out_path.iterdir():
+                if item.name == "agent_logs":
+                    continue
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    import shutil
+                    shutil.rmtree(item)
+
         # Always run the local harness pipeline first (gracefully skip if no inputs)
         try:
             harness_result = run_target_model_pipeline(
@@ -531,6 +695,7 @@ class AutoEmuAgentRuntime:
                 target_peripheral=target_peripheral,
                 data_dir=data_dir,
                 output_dir=output_dir,
+                qemu_src=self.config.qemu_src,
             )
         except ValueError as exc:
             # No SVD/headers/drivers fetched yet — skip harness and rely on agent
@@ -561,8 +726,19 @@ class AutoEmuAgentRuntime:
                 def _on_build_event(etype: str, phase: str, detail: str) -> None:
                     _emit_agent_event(_log, etype, phase, detail)
 
-                result = asyncio.run(
-                    orchestrator.model_peripheral(
+                model_kwargs: dict[str, Any] = {"on_event": _on_build_event}
+                model_sig = inspect.signature(orchestrator.model_peripheral)
+                if (
+                    "phase_delay_seconds" in model_sig.parameters
+                    or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in model_sig.parameters.values()
+                    )
+                ):
+                    model_kwargs["phase_delay_seconds"] = self.config.agent_phase_delay
+
+                result = _run_async_factory_with_retry(
+                    lambda: orchestrator.model_peripheral(
                         ModelingTask(
                             peripheral_name=target_peripheral,
                             mcu_family=infer_stm32_mcu_family(target_mcu),
@@ -573,8 +749,10 @@ class AutoEmuAgentRuntime:
                             output_dir=output_dir,
                             data_dir=data_dir,
                         ),
-                        on_event=_on_build_event,
-                    )
+                        **model_kwargs,
+                    ),
+                    max_retries=3,
+                    delay=1.0,
                 )
                 if result.error:
                     agent_error = _sanitize_agent_error(result.error)
@@ -587,6 +765,70 @@ class AutoEmuAgentRuntime:
                 agent_error = _sanitize_agent_error(str(exc))
                 _log(f"Agent build unavailable, using harness output: {agent_error}", "warn")
                 harness_result["agent_error"] = agent_error
+
+        # If the agent extracted a better register model (e.g. correct base address)
+        # but the generate phase failed, regenerate the bundle from the agent model
+        # so that QEMU code uses the corrected values.
+        agent_register_model = out_path / f"{_snake(target_peripheral)}_register_model.json"
+        if agent_register_model.exists():
+            try:
+                agent_data = json.loads(agent_register_model.read_text(encoding="utf-8"))
+                agent_rb = agent_data.get("register_block")
+                if agent_rb:
+                    from autoemu.generators.bundle_generator import generate_model_bundle
+                    from autoemu.models.register import RegisterBlock
+                    from autoemu.models.state_machine import StateMachine
+                    from autoemu.models.interrupt import InterruptModel
+                    from autoemu.models.dependency import DependencyGraph
+                    from autoemu.parsers.driver_parser import DriverAnalysis
+
+                    register_blocks = {
+                        target_peripheral: RegisterBlock.model_validate(agent_rb)
+                    }
+                    state_machine = None
+                    sm_path = out_path / f"{_snake(target_peripheral)}_state_machine.json"
+                    if sm_path.exists():
+                        try:
+                            sm_data = json.loads(sm_path.read_text(encoding="utf-8"))
+                            state_machine = StateMachine.model_validate(sm_data.get("model", sm_data))
+                        except Exception:
+                            pass
+                    interrupt_model = None
+                    im_path = out_path / f"{_snake(target_peripheral)}_interrupt_model.json"
+                    if im_path.exists():
+                        try:
+                            im_data = json.loads(im_path.read_text(encoding="utf-8"))
+                            interrupt_model = InterruptModel.model_validate(im_data.get("model", im_data))
+                        except Exception:
+                            pass
+                    deps = None
+                    dep_path = out_path / f"{_snake(target_peripheral)}_dependencies.json"
+                    if dep_path.exists():
+                        try:
+                            dep_data = json.loads(dep_path.read_text(encoding="utf-8"))
+                            deps = DependencyGraph.model_validate(dep_data.get("model", dep_data))
+                        except Exception:
+                            pass
+
+                    _log(
+                        f"Regenerating bundle from agent register model "
+                        f"(base=0x{agent_rb.get('base_address', 0):X}) ...",
+                        "agent_thinking",
+                    )
+                    bundle = generate_model_bundle(
+                        target_peripheral,
+                        register_blocks,
+                        output_dir=out_path,
+                        state_machine=state_machine,
+                        interrupt_model=interrupt_model,
+                        dependencies=deps,
+                        mcu_family=infer_stm32_mcu_family(target_mcu),
+                        qemu_src=self.config.qemu_src,
+                    )
+                    harness_result["generated_files"] = bundle["generated_files"]
+                    _log("Bundle regenerated from agent model", "agent_text")
+            except Exception as e:
+                _log(f"Could not regenerate bundle from agent model: {e}", "warn")
 
         return harness_result
 

@@ -1,24 +1,35 @@
 # AutoEmu configuration file
 # Copy to .autoemu.toml in your working directory.
-# Values here override environment variables.
+# Resolution order: environment variables → .autoemu.toml → defaults.
 
 [agent]
-# Backend: "harness" (default, no AI), "claude-sdk", "codex-sdk",
-# "anthropic-api", or "openai-api"
+# Backend driver.  The deterministic harness runs first regardless;
+# the agent backend is only an optional enhancer.
+#   "harness"      – no AI, use only local parsers and generators (default)
+#   "claude-sdk"   – Claude Agent SDK (MCP-based tool calling)
+#   "codex-sdk"    – OpenAI Codex CLI app-server SDK
+#   "anthropic-api"– Direct Anthropic API (no SDK)
+#   "openai-api"   – Direct OpenAI API (no SDK)
 backend = "harness"
 
-# LLM model override (optional, backend-specific)
-# model = "claude-sonnet-4-20250514"
+# LLM model identifier (backend-specific).
+# Examples: "claude-sonnet-4-20250514", "gpt-5.5", "o3"
+# model = ""
 
-# Maximum spend per pipeline run (USD)
+# Maximum spend per pipeline run (USD).
 # max_budget_usd = 5.0
 
-# API keys (alternatively set ANTHROPIC_API_KEY / OPENAI_API_KEY env vars)
+# Seconds to wait between agent phases.  Codex and some other backends have
+# burst limits; a larger delay (30 s) avoids hitting the cap after the
+# first few successful phases.
+# agent_phase_delay = 30.0
+
+# API keys (alternatively set ANTHROPIC_API_KEY / OPENAI_API_KEY env vars).
 # anthropic_api_key = "sk-ant-..."
 # openai_api_key = "sk-..."
 
-# Base URLs for API proxies or self-hosted endpoints
-# (alternatively set ANTHROPIC_BASE_URL / OPENAI_BASE_URL env vars)
+# Base URLs for API proxies or self-hosted endpoints.
+# (alternatively set ANTHROPIC_BASE_URL / OPENAI_BASE_URL env vars).
 # anthropic_base_url = "https://api.anthropic.com"
 # openai_base_url = "https://api.openai.com/v1"
 

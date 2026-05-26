@@ -179,16 +179,18 @@ class TestCodexSdkBackend:
 
         captured: dict[str, object] = {}
 
-        class _FakeResult:
-            final_response = "hello from codex"
-            items = []
-            usage = None
+        class _FakeDelta:
+            delta = "hello from codex"
+
+        class _FakeHandle:
+            async def stream(self):
+                captured["streamed"] = True
+                yield _FakeDelta()
 
         class _FakeThread:
-            async def run(self, prompt, **kwargs):
-                captured["prompt"] = prompt
-                captured["run_kwargs"] = kwargs
-                return _FakeResult()
+            async def turn(self, prompt_input):
+                captured["prompt"] = getattr(prompt_input, "text", str(prompt_input))
+                return _FakeHandle()
 
         class _FakeAsyncCodex:
             def __init__(self, config=None):
@@ -205,6 +207,7 @@ class TestCodexSdkBackend:
                 return _FakeThread()
 
         monkeypatch.setattr(mod, "AsyncCodex", _FakeAsyncCodex)
+        monkeypatch.setattr(mod, "_AgentMessageDeltaNotification", _FakeDelta)
 
         events = []
         async for ev in mod.CodexSdkBackend().run(
@@ -239,12 +242,14 @@ class TestCodexSdkBackend:
                 self.codex_bin = codex_bin
                 self.config_overrides = config_overrides
 
-        class _FakeResult:
-            final_response = ""
+        class _FakeHandle:
+            async def stream(self):
+                return
+                yield
 
         class _FakeThread:
-            async def run(self, prompt, **kwargs):
-                return _FakeResult()
+            async def turn(self, prompt_input):
+                return _FakeHandle()
 
         class _FakeAsyncCodex:
             def __init__(self, config=None):

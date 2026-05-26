@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -22,6 +23,20 @@ from autoemu.agent.prompts import (
     build_system_prompt,
 )
 from autoemu.agent.tools import ALL_TOOLS
+from autoemu.modeling_utils import snake_case as _snake
+
+
+def _is_transient_backend_error(text: str) -> bool:
+    """Return True if *text* looks like a recoverable transport/subprocess failure."""
+    msg = text.lower()
+    return any(p in msg for p in (
+        "failed reading from stdio transport",
+        "stdio",
+        "transport",
+        "broken pipe",
+        "connection reset",
+    ))
+
 
 # Tools available during the peripheral modeling phases.
 # fetch_data is intentionally excluded: each phase receives the data that was
@@ -29,6 +44,52 @@ from autoemu.agent.tools import ALL_TOOLS
 # the agent to make redundant (and wrong-MCU-family) fetch calls during the
 # interrupt-analysis and dependency-graph phases.
 _MODEL_TOOLS = [t for t in ALL_TOOLS if t.name != "fetch_data"]
+
+
+def _write_phase_log(
+    output_dir: str,
+    phase: str,
+    attempt: int,
+    prompt: str,
+    system_prompt: str,
+    events: list[dict[str, Any]],
+    error: str = "",
+) -> Path:
+    """Persist the full agent conversation for a single phase attempt to disk.
+
+    Returns the path to the written log file.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(output_dir) / "agent_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{ts}_{phase}_attempt{attempt}.txt"
+
+    lines: list[str] = [
+        f"=== AutoEmu Agent Conversation Log ===",
+        f"Timestamp: {ts} UTC",
+        f"Phase: {phase}",
+        f"Attempt: {attempt}",
+        "",
+        "=== SYSTEM PROMPT ===",
+        system_prompt,
+        "",
+        "=== USER PROMPT ===",
+        prompt,
+        "",
+        "=== EVENTS ===",
+    ]
+
+    for ev in events:
+        etype = ev.get("type", "unknown")
+        detail = ev.get("detail", "")
+        lines.append(f"[{etype}] {detail}")
+
+    if error:
+        lines.extend(["", f"=== ERROR ===", error])
+
+    lines.append("")
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+    return log_path
 
 
 def _mcu_slug(task: "ModelingTask") -> str:
@@ -195,26 +256,23 @@ def _build_generation_prompt(task: ModelingTask) -> str:
             f"Use list_files and read_file to inspect available SVD, header, and driver files."
         )
     prompt += (
-        f"\n\nIf you have raw SVD/header/driver inputs and need the whole flow from scratch, "
-        f"prefer run_model_pipeline with output_dir='{task.output_dir}'. "
-        f"\n\nPrefer generate_model_bundle with output_dir='{task.output_dir}' "
-        f"to assemble the peripheral, emit QEMU artifacts, and write validation reports. "
-        f"Use generate_qemu_peripheral and generate_test_harness only when manual refinement "
-        f"is required."
-        f"\n\nIMPORTANT: If generate_model_bundle or run_model_pipeline fails or is unavailable, "
-        f"fall back to generating the QEMU C code directly in your response, then use write_file "
-        f"to save each file to '{task.output_dir}/'. Do NOT skip file creation — the code MUST "
-        f"be written to disk even if the tool calls fail.\n"
-        f"Name generated files after the actual MCU name '{_mcu_slug(task)}', not after a generic "
-        f"template or MCU family. "
-        f"Use filenames like '{_mcu_slug(task)}_{task.peripheral_name.lower()}.c' and "
+        f"\n\nUse ONLY the available tools to generate code. Do NOT write code "
+        f"directly in your response — tool calls are faster and avoid timeouts. "
+        f"\n\nStep 1: Read the register model JSON at "
+        f"'{task.output_dir}/{_snake(task.peripheral_name)}_register_model.json' (file path) "
+        f"to get the register block. "
+        f"\nStep 2: Call generate_model_bundle with output_dir='{task.output_dir}', "
+        f"passing the JSON FILE PATH as register_blocks_json (do not inline the JSON). "
+        f"If state_machine_json or interrupt_model_json files exist in {task.output_dir}, "
+        f"pass their file paths as well. "
+        f"\nStep 3: If generate_model_bundle is unavailable, use generate_qemu_peripheral "
+        f"with the peripheral JSON it produced. "
+        f"\n\nGenerate ONLY ONE .c and ONE .h file. Name them "
+        f"'{_mcu_slug(task)}_{task.peripheral_name.lower()}.c' and "
         f"'{_mcu_slug(task)}_{task.peripheral_name.lower()}.h'. "
-        f"Generate ONLY ONE .c and ONE .h file — do not create multiple variants with different "
-        f"MCU name prefixes (e.g. do not create both hikey960_gpu.c and kirin960_gpu.c). "
-        f"The header file must be included with a local path "
+        f"The header must use a local include path "
         f"(e.g. #include \"{_mcu_slug(task)}_{task.peripheral_name.lower()}.h\"), "
-        f"not a system path (e.g. not #include \"hw/...\"), because it is generated "
-        f"into the same output directory."
+        f"not a system path."
     )
     return prompt
 
@@ -279,9 +337,10 @@ class AutoEmuOrchestrator:
         model: str | None = None,
         max_budget_usd: float = 5.0,
         verbose: bool = False,
+        backend_kwargs: dict[str, Any] | None = None,
     ):
         if isinstance(backend, str):
-            self._backend = create_backend(backend)
+            self._backend = create_backend(backend, **(backend_kwargs or {}))
         else:
             self._backend = backend
         self.model = model
@@ -297,14 +356,23 @@ class AutoEmuOrchestrator:
         task: ModelingTask,
         on_message: Any | None = None,
         on_event: Any | None = None,
+        phase_delay_seconds: float = 0.0,
+        skip_on_failure: bool = True,
     ) -> ModelingResult:
         """Run the full modeling pipeline for a peripheral.
 
         *on_event(event_type, phase, detail)* is called for every agent
         event so the caller can render progress.
+
+        If a single phase fails with a transient backend error (e.g. stdio
+        transport crash), that phase is retried up to 2 times without
+        restarting earlier phases.  After retries are exhausted the phase is
+        skipped when *skip_on_failure* is True so that later phases can still
+        run using the deterministic harness output already on disk.
         """
         result = ModelingResult(peripheral_name=task.peripheral_name)
         total_cost = 0.0
+        skipped_phases: list[str] = []
 
         def _emit(etype: str, phase: str, detail: str) -> None:
             if on_event:
@@ -316,40 +384,88 @@ class AutoEmuOrchestrator:
                 if not builder:
                     continue
 
-                prompt = builder(task)
-                phase_text: list[str] = []
+                # Small delay between phases to avoid bursting the API and
+                # triggering rate limits / concurrent-session caps.
+                if phase_delay_seconds > 0:
+                    await asyncio.sleep(phase_delay_seconds)
 
-                _emit("phase_start", phase, prompt[:300])
+                phase_success = False
+                for attempt in range(3):
+                    prompt = builder(task)
+                    phase_text: list[str] = []
+                    event_log: list[dict[str, Any]] = []
+                    sys_prompt = build_system_prompt(mode="model", cwd=task.output_dir)
 
-                async for event in self._backend.run(
-                    prompt,
-                    system_prompt=build_system_prompt(mode="model", cwd=task.output_dir),
-                    tools=_MODEL_TOOLS,
-                    model=self.model,
-                    max_budget_usd=self.max_budget_usd,
-                    cwd=task.output_dir,
-                ):
-                    if event.type == "text":
-                        phase_text.append(event.text)
-                        if on_message:
-                            on_message(phase, event.text)
-                        _emit("text", phase, event.text)
-                    elif event.type == "tool_call":
-                        _emit("tool_call", phase,
-                              f"{event.tool_name}({event.tool_input[:200]})")
-                    elif event.type == "error":
-                        result.error = event.text
-                        total_cost += event.cost_usd
-                        result.total_cost_usd = total_cost
-                        _emit("error", phase, event.text)
-                        return result
-                    elif event.type == "complete":
-                        total_cost += event.cost_usd
-                        _emit("phase_done", phase,
-                              f"${event.cost_usd:.4f}")
+                    _emit("phase_start", phase, prompt[:300])
 
-                result.phases_completed.append(phase)
-                result.agent_messages.extend(phase_text)
+                    async for event in self._backend.run(
+                        prompt,
+                        system_prompt=sys_prompt,
+                        tools=_MODEL_TOOLS,
+                        model=self.model,
+                        max_budget_usd=self.max_budget_usd,
+                        cwd=task.output_dir,
+                    ):
+                        if event.type == "text":
+                            phase_text.append(event.text)
+                            event_log.append({"type": "text", "detail": event.text[:500]})
+                            if on_message:
+                                on_message(phase, event.text)
+                            _emit("text", phase, event.text)
+                        elif event.type == "tool_call":
+                            detail = f"{event.tool_name}({event.tool_input[:200]})"
+                            event_log.append({"type": "tool_call", "detail": detail})
+                            _emit("tool_call", phase, detail)
+                        elif event.type == "error":
+                            total_cost += event.cost_usd
+                            event_log.append({"type": "error", "detail": event.text})
+                            log_path = _write_phase_log(
+                                task.output_dir, phase, attempt, prompt, sys_prompt,
+                                event_log, error=event.text,
+                            )
+                            if _is_transient_backend_error(event.text) and attempt < 2:
+                                _emit("text", phase,
+                                      f"Transient transport error, retrying phase "
+                                      f"({attempt + 1}/3)...")
+                                # Longer backoff for stdio transport crashes
+                                await asyncio.sleep(5.0 * (2 ** attempt))
+                                break
+                            result.error = event.text
+                            result.total_cost_usd = total_cost
+                            _emit("error", phase, event.text)
+                            if skip_on_failure:
+                                skipped_phases.append(phase)
+                                _emit("text", phase,
+                                      f"Skipping phase {phase} after failure; "
+                                      f"continuing with remaining phases.")
+                                result.error = ""
+                                break
+                            return result
+                        elif event.type == "complete":
+                            total_cost += event.cost_usd
+                            event_log.append({"type": "complete", "detail": f"${event.cost_usd:.4f}"})
+                            _emit("phase_done", phase,
+                                  f"${event.cost_usd:.4f}")
+                    else:
+                        # Phase completed normally (no break from error retry)
+                        result.phases_completed.append(phase)
+                        result.agent_messages.extend(phase_text)
+                        phase_success = True
+                        _write_phase_log(
+                            task.output_dir, phase, attempt, prompt, sys_prompt,
+                            event_log,
+                        )
+                        break
+
+                if not phase_success and skip_on_failure and phase in skipped_phases:
+                    # Continue to next phase after logging the skip
+                    continue
+
+                if not phase_success:
+                    if not result.error:
+                        result.error = f"Phase {phase} failed after 3 attempts"
+                    result.total_cost_usd = total_cost
+                    return result
 
         except Exception as e:
             result.error = str(e)
@@ -431,11 +547,13 @@ class AutoEmuOrchestrator:
         try:
             prompt = _build_fetch_prompt(task)
             phase_text: list[str] = []
+            event_log: list[dict[str, Any]] = []
+            sys_prompt = build_system_prompt(mode="fetch", cwd=task.output_dir)
             _emit("phase_start", prompt[:300])
 
             async for event in self._backend.run(
                 prompt,
-                system_prompt=build_system_prompt(mode="fetch", cwd=task.output_dir),
+                system_prompt=sys_prompt,
                 tools=ALL_TOOLS,
                 model=self.model,
                 max_budget_usd=self.max_budget_usd,
@@ -443,23 +561,34 @@ class AutoEmuOrchestrator:
             ):
                 if event.type == "text":
                     phase_text.append(event.text)
+                    event_log.append({"type": "text", "detail": event.text[:500]})
                     if on_message:
                         on_message("fetch", event.text)
                     _emit("text", event.text)
                 elif event.type == "tool_call":
-                    _emit("tool_call",
-                          f"{event.tool_name}({event.tool_input[:200]})")
+                    detail = f"{event.tool_name}({event.tool_input[:200]})"
+                    event_log.append({"type": "tool_call", "detail": detail})
+                    _emit("tool_call", detail)
                 elif event.type == "error":
                     result.error = event.text
                     total_cost += event.cost_usd
+                    event_log.append({"type": "error", "detail": event.text})
+                    _write_phase_log(
+                        task.output_dir, "fetch", 0, prompt, sys_prompt,
+                        event_log, error=event.text,
+                    )
                     result.total_cost_usd = total_cost
                     _emit("error", event.text)
                     return result
                 elif event.type == "complete":
                     total_cost += event.cost_usd
+                    event_log.append({"type": "complete", "detail": f"${event.cost_usd:.4f}"})
                     _emit("phase_done", f"${event.cost_usd:.4f}")
 
             result.agent_messages.extend(phase_text)
+            _write_phase_log(
+                task.output_dir, "fetch", 0, prompt, sys_prompt, event_log,
+            )
         except Exception as e:
             result.error = str(e)
 

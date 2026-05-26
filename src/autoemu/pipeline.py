@@ -33,6 +33,7 @@ def run_model_pipeline(
     driver_paths: Iterable[str | Path] = (),
     documentation_paths: Iterable[str | Path] = (),
     mcu_family: str = "",
+    qemu_src: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run steps 1-5 and emit an end-to-end QEMU-ready peripheral bundle."""
     driver_path_list = [str(path) for path in driver_paths if str(path)]
@@ -119,6 +120,7 @@ def run_model_pipeline(
         dependencies=dependency_graph,
         driver_analysis=driver_analysis,
         mcu_family=mcu_family,
+        qemu_src=qemu_src,
     )
 
     return {
@@ -143,6 +145,7 @@ def run_target_model_pipeline(
     target_peripheral: str,
     data_dir: str | Path = "data/stm32",
     output_dir: str | Path = "output",
+    qemu_src: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the end-to-end pipeline from previously fetched target data."""
     inputs = resolve_fetched_input_bundle(
@@ -165,6 +168,7 @@ def run_target_model_pipeline(
         driver_paths=inputs.driver_paths,
         documentation_paths=inputs.documentation_paths,
         mcu_family=infer_stm32_mcu_family(target_mcu),
+        qemu_src=qemu_src,
     )
     result["target_mcu"] = target_mcu
     result["target_peripheral"] = target_peripheral

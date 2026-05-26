@@ -50,6 +50,16 @@ def _err(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"Error: {text}"}], "is_error": True}
 
 
+def _load_json_arg(args: dict[str, Any], key: str) -> Any:
+    """Load JSON from inline string or file path."""
+    raw = args.get(key, "")
+    if not raw or raw == "null":
+        return None
+    if raw.startswith("{"):
+        return json.loads(raw)
+    return json.loads(Path(raw).read_text(encoding="utf-8"))
+
+
 def _format_driver_analysis(analysis: DriverAnalysis) -> str:
     sections = [f"# Driver Analysis: {analysis.peripheral_name}\n"]
 
@@ -304,11 +314,17 @@ async def _build_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _generate_model_bundle(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        register_blocks_data = json.loads(args["register_blocks_json"])
-        state_machine_data = json.loads(args.get("state_machine_json", "null"))
-        interrupt_model_data = json.loads(args.get("interrupt_model_json", "null"))
-        dependency_graph_data = json.loads(args.get("dependency_graph_json", "null"))
-        driver_analysis_data = json.loads(args.get("driver_analysis_json", "null"))
+        # Accept either inline JSON or a file path to avoid huge tool arguments
+        rb_raw = args.get("register_blocks_json", "")
+        if rb_raw.startswith("{"):
+            register_blocks_data = json.loads(rb_raw)
+        else:
+            register_blocks_data = json.loads(Path(rb_raw).read_text(encoding="utf-8"))
+
+        state_machine_data = _load_json_arg(args, "state_machine_json")
+        interrupt_model_data = _load_json_arg(args, "interrupt_model_json")
+        dependency_graph_data = _load_json_arg(args, "dependency_graph_json")
+        driver_analysis_data = _load_json_arg(args, "driver_analysis_json")
 
         result = generate_model_bundle(
             args["peripheral_name"],
@@ -418,6 +434,15 @@ async def _validate_behavior(args: dict[str, Any]) -> dict[str, Any]:
         return _err(f"Behavior validation failed: {e}")
 
 
+_BINARY_EXTENSIONS = {
+    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+    ".mp3", ".mp4", ".avi", ".mov", ".mkv",
+    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+}
+
+
 async def _read_file(args: dict[str, Any]) -> dict[str, Any]:
     try:
         path = Path(args["file_path"])
@@ -425,7 +450,17 @@ async def _read_file(args: dict[str, Any]) -> dict[str, Any]:
             return _err(f"File not found: {path}")
         if path.stat().st_size > 5 * 1024 * 1024:
             return _err(f"File too large: {path.stat().st_size} bytes")
-        content = path.read_text(encoding="utf-8", errors="replace")
+        if path.suffix.lower() in _BINARY_EXTENSIONS:
+            return _err(
+                f"Binary file ({path.suffix}) cannot be read as text: {path}"
+            )
+        raw = path.read_bytes()
+        # Reject files with significant binary content (many nulls or control chars)
+        if len(raw) > 0:
+            null_count = raw.count(0)
+            if null_count > max(16, len(raw) * 0.01):
+                return _err(f"File appears to be binary: {path}")
+        content = raw.decode("utf-8", errors="replace")
         return _ok(content)
     except Exception as e:
         return _err(f"File read failed: {e}")
