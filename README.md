@@ -43,20 +43,24 @@ flowchart TB
 
 ## Workflow
 
-The public `AutoEmuAgentRuntime.run_pipeline()` workflow has four high-level
+The public `AutoEmuAgentRuntime.run_pipeline()` workflow has five high-level
 phases:
 
 1. **Detect platform** — infers vendor, architecture, family, and platform
    plugin from the target name.
 2. **Fetch input data** — discovers and downloads candidate SVD, header,
    driver, and documentation files into `data/<target>/`, with manifest-based
-   input resolution.
+   input resolution. When a CVE ID is provided, also fetches CVE-related
+   driver source code for modeling enrichment.
 3. **Build QEMU peripheral model** — runs the deterministic modeling pipeline:
    register extraction, driver analysis, state/interrupt/dependency inference,
    peripheral assembly, and artifact generation.
 4. **Validate generated code** — checks generated C/H files against QEMU
    include paths when available, reports warnings for missing QEMU headers, and
    flags non-functional empty models.
+5. **Test driver probing** — copies generated files into the QEMU build tree
+   and attempts a targeted `ninja` rebuild. This phase is soft-fail: a missing
+   build environment or compile error does not block the pipeline.
 
 The lower-level `run_model_pipeline()` accepts explicit input files and runs
 the modeling sub-pipeline directly:

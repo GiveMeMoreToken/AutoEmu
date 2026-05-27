@@ -107,21 +107,35 @@ def _replace_function_or_insert(
             start = i
             break
     if start >= 0:
-        # Find the matching closing brace.  We assume the function uses
-        # brace-delimited blocks and track depth from the opening '{'.
-        end = start + 1
+        # Find the matching closing brace.  We track depth from the opening
+        # '{' and require that we have seen at least one brace before we
+        # accept depth<=0 as the end of the function.
         depth = 0
-        while end < len(lines):
-            for ch in lines[end]:
+        found_open = "{" in lines[start]
+        if found_open:
+            for ch in lines[start]:
                 if ch == "{":
                     depth += 1
                 elif ch == "}":
                     depth -= 1
-            if depth <= 0 and "{" in lines[start:end + 1]:
-                # end now points at the line with the final '}'
+
+        end = start + 1
+        while end < len(lines):
+            for ch in lines[end]:
+                if ch == "{":
+                    depth += 1
+                    found_open = True
+                elif ch == "}":
+                    depth -= 1
+            if found_open and depth <= 0:
                 break
             end += 1
-        # Replace [start:end+1] with new_body
+
+        if not found_open:
+            # Corrupted or unusual input — no opening brace found.
+            # Replace just the signature line to avoid corrupting the rest.
+            end = start
+
         lines[start:end + 1] = list(new_body)
     elif insert_index >= 0:
         for line in reversed(new_body):
@@ -177,56 +191,69 @@ def generate_virt_patch(
 
     # --- Patch hw/arm/virt.c ---
     virt_c = qemu_src_path / "hw" / "arm" / "virt.c"
+    already_patched = False
     if virt_c.exists():
-        orig_c_lines = virt_c.read_text(encoding="utf-8").splitlines(keepends=True)
+        orig_c_text = virt_c.read_text(encoding="utf-8")
+        # Detect if the QEMU tree has already been patched for this peripheral.
+        # Generating a diff from a modified baseline produces a broken patch.
+        if f"static void create_{snake}(" in orig_c_text:
+            already_patched = True
+
+        orig_c_lines = orig_c_text.splitlines(keepends=True)
         mod_c_lines = list(orig_c_lines)
 
-        # Update or insert into base_memmap[]
-        mem_idx = _find_memmap_insert_index(mod_c_lines)
-        mem_token = f"[VIRT_{upper}]"
-        mem_new_line = f"    [VIRT_{upper}] =           {{ 0x{base_addr:08X}, 0x{addr_size:08X} }},\n"
-        _replace_or_insert(mod_c_lines, mem_token, mem_new_line, mem_idx, predicate=lambda ln: "{" in ln)
+        if not already_patched:
+            # Update or insert into base_memmap[]
+            mem_idx = _find_memmap_insert_index(mod_c_lines)
+            mem_token = f"[VIRT_{upper}]"
+            mem_new_line = f"    [VIRT_{upper}] =           {{ 0x{base_addr:08X}, 0x{addr_size:08X} }},\n"
+            _replace_or_insert(mod_c_lines, mem_token, mem_new_line, mem_idx, predicate=lambda ln: "{" in ln)
 
-        # Update or insert into a15irqmap[]
-        irq_idx = _find_irqmap_insert_index(mod_c_lines)
-        irq_new_line = f"    [VIRT_{upper}] = {irq},\n"
-        _replace_or_insert(mod_c_lines, mem_token, irq_new_line, irq_idx, predicate=lambda ln: "{" not in ln)
+            # Update or insert into a15irqmap[]
+            irq_idx = _find_irqmap_insert_index(mod_c_lines)
+            irq_new_line = f"    [VIRT_{upper}] = {irq},\n"
+            _replace_or_insert(mod_c_lines, mem_token, irq_new_line, irq_idx, predicate=lambda ln: "{" not in ln)
 
-        # Update or insert create_* helper function
-        func_idx = _find_create_function_insert_index(mod_c_lines)
-        func_sig = f"static void create_{snake}("
-        create_func = [
-            f"static void create_{snake}(const VirtMachineState *vms)\n",
-            "{\n",
-            f"    DeviceState *dev = qdev_new(\"{device_type}\");\n",
-            "    SysBusDevice *s = SYS_BUS_DEVICE(dev);\n",
-            "\n",
-            "    sysbus_realize_and_unref(s, &error_fatal);\n",
-            f"    sysbus_mmio_map(s, 0, vms->memmap[VIRT_{upper}].base);\n",
-        ]
-        for i in range(n_irq):
-            create_func.append(
-                f"    sysbus_connect_irq(s, {i}, qdev_get_gpio_in(vms->gic, "
-                f"vms->irqmap[VIRT_{upper}] + {i}));\n"
+            # Update or insert create_* helper function
+            func_idx = _find_create_function_insert_index(mod_c_lines)
+            func_sig = f"static void create_{snake}("
+            create_func = [
+                f"static void create_{snake}(const VirtMachineState *vms)\n",
+                "{\n",
+                f"    DeviceState *dev = qdev_new(\"{device_type}\");\n",
+                "    SysBusDevice *s = SYS_BUS_DEVICE(dev);\n",
+                "\n",
+                "    sysbus_realize_and_unref(s, &error_fatal);\n",
+                f"    sysbus_mmio_map(s, 0, vms->memmap[VIRT_{upper}].base);\n",
+            ]
+            for i in range(n_irq):
+                create_func.append(
+                    f"    sysbus_connect_irq(s, {i}, qdev_get_gpio_in(vms->gic, "
+                    f"vms->irqmap[VIRT_{upper}] + {i}));\n"
+                )
+            create_func.append("}\n")
+            create_func.append("\n")
+            _replace_function_or_insert(mod_c_lines, func_sig, create_func, func_idx)
+
+            # Insert call inside virt_machine_init
+            call_idx = _find_init_function_call_index(mod_c_lines)
+            call_line = f"create_{snake}(vms)"
+            if call_idx >= 0 and not any(call_line in line for line in mod_c_lines):
+                mod_c_lines.insert(call_idx, f"    create_{snake}(vms);\n")
+
+            if orig_c_lines != mod_c_lines:
+                diff_c = difflib.unified_diff(
+                    orig_c_lines,
+                    mod_c_lines,
+                    fromfile="hw/arm/virt.c",
+                    tofile="hw/arm/virt.c",
+                )
+                patch_parts.extend(diff_c)
+        else:
+            patch_parts.append(
+                f"# Patch skipped: virt.c already contains create_{snake}()\n"
+                f"# Reset QEMU source tree to generate a clean patch.\n"
             )
-        create_func.append("}\n")
-        create_func.append("\n")
-        _replace_function_or_insert(mod_c_lines, func_sig, create_func, func_idx)
-
-        # Insert call inside virt_machine_init
-        call_idx = _find_init_function_call_index(mod_c_lines)
-        call_line = f"create_{snake}(vms)"
-        if call_idx >= 0 and not any(call_line in line for line in mod_c_lines):
-            mod_c_lines.insert(call_idx, f"    create_{snake}(vms);\n")
-
-        if orig_c_lines != mod_c_lines:
-            diff_c = difflib.unified_diff(
-                orig_c_lines,
-                mod_c_lines,
-                fromfile="hw/arm/virt.c",
-                tofile="hw/arm/virt.c",
-            )
-            patch_parts.extend(diff_c)
 
     patch_text = "".join(patch_parts)
     patch_path = output_path / f"virt_{snake}.patch"
@@ -241,10 +268,16 @@ def generate_virt_patch(
         f'        compatible = "{device_type}";',
         f"        reg = <0x0 0x{base_addr:08x} 0x0 0x{addr_size:08x}>;",
     ]
-    if n_irq:
+    if n_irq == 1:
         dtso_lines.append(
             f"        interrupts = <GIC_SPI {irq} IRQ_TYPE_LEVEL_HIGH>;"
         )
+    elif n_irq > 1:
+        irq_specs = [f"<GIC_SPI {irq + i} IRQ_TYPE_LEVEL_HIGH>" for i in range(n_irq)]
+        dtso_lines.append(f"        interrupts = {irq_specs[0]},")
+        for spec in irq_specs[1:-1]:
+            dtso_lines.append(f"                     {spec},")
+        dtso_lines.append(f"                     {irq_specs[-1]};")
     dtso_lines.extend([
         "    };",
         "};",
@@ -257,6 +290,7 @@ def generate_virt_patch(
         "patch_path": str(patch_path),
         "dtso_path": str(dtso_path),
         "patch_text": patch_text,
+        "already_patched": already_patched,
     }
 
 
@@ -266,8 +300,12 @@ def apply_machine_patch(
 ) -> bool:
     """Apply a generated unified diff patch to the QEMU source tree.
 
-    Uses Python's difflib patch application (simple line-based).
+    Delegates to the system ``patch`` command for robust hunk matching.
+    Falls back to a simple line-based applier when ``patch`` is unavailable.
     """
+    import shutil
+    import subprocess
+
     qemu_src_path = Path(qemu_src)
     patch_file = Path(patch_path)
 
@@ -278,8 +316,29 @@ def apply_machine_patch(
     if not patch_text.strip():
         return True
 
-    # Simple unified diff application
-    # We parse the @@ headers and apply hunks line by line
+    # Skip comment-only patches (e.g. "already patched" notices)
+    if all(line.startswith("#") or not line.strip() for line in patch_text.splitlines()):
+        return True
+
+    # Prefer the system patch command
+    patch_cmd = shutil.which("patch")
+    if patch_cmd:
+        try:
+            result = subprocess.run(
+                [patch_cmd, "-p1", "-i", str(patch_file), "-d", str(qemu_src_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return True
+            # If patch failed (e.g. wrong baseline), don't fall back to naive
+            # applier which would corrupt files — just return False.
+            return False
+        except Exception:
+            pass
+
+    # Fallback: simple line-based diff application (best-effort)
     current_file: Path | None = None
     orig_lines: list[str] = []
     new_lines: list[str] = []

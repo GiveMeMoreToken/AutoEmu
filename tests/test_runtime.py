@@ -147,9 +147,14 @@ def test_run_pipeline_calls_phases(monkeypatch, tmp_path):
         phases_seen.append("validate")
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
+    def fake_do_test(self, **kwargs):
+        phases_seen.append("test")
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -159,7 +164,7 @@ def test_run_pipeline_calls_phases(monkeypatch, tmp_path):
 
     assert result.success
     assert "stm" in result.platform.lower()
-    assert phases_seen == ["fetch", "build", "validate"]
+    assert phases_seen == ["fetch", "build", "validate", "test"]
 
 
 def test_run_pipeline_emits_progress(monkeypatch):
@@ -175,9 +180,13 @@ def test_run_pipeline_emits_progress(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -193,6 +202,7 @@ def test_run_pipeline_emits_progress(monkeypatch):
     assert 2 in phase_numbers  # fetch
     assert 3 in phase_numbers  # build
     assert 4 in phase_numbers  # validate
+    assert 5 in phase_numbers  # test
     assert any(p.finished for p in progress_log)
 
 
@@ -231,9 +241,13 @@ def test_run_pipeline_fails_when_validation_fails(monkeypatch):
             "warnings": ["gpu_peripheral.json has base_address=0 - likely incorrect"],
         }
 
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -262,9 +276,13 @@ def test_run_pipeline_falls_back_on_agent_errors_when_local_valid(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
 
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
     result = runtime.run_pipeline(
@@ -292,9 +310,13 @@ def test_run_pipeline_generic_platform_detection(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -324,9 +346,13 @@ def test_run_pipeline_per_mcu_data_dirs(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
 
     runtime = AutoEmuAgentRuntime()
 
@@ -437,3 +463,125 @@ def test_do_validate_uses_configured_qemu_source(monkeypatch, tmp_path):
     assert captured["find_qemu_src"] == "/opt/qemu"
     assert captured["validate_qemu_src"] == "/opt/qemu"
     assert captured["files"] == [str(output_dir / "demo.c")]
+def test_run_pipeline_soft_fails_when_probe_fails(monkeypatch):
+    """Phase 5 failure must not fail the pipeline (soft-fail)."""
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "downloaded": [{"file": "driver.c"}]}
+
+    def fake_do_build(self, **kwargs):
+        return {"success": True, "generated_files": ["output/hikey960_gpu.c"]}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
+
+    def fake_do_test(self, **kwargs):
+        return {"success": False, "skipped": False, "reason": "ninja returned 1"}
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+    )
+
+    # Pipeline should still succeed because probe is soft-fail
+    assert result.success is True
+    assert result.probe_result["success"] is False
+    assert "ninja returned 1" in result.probe_result["reason"]
+
+
+def test_run_pipeline_cve_driver_fetch(monkeypatch, tmp_path):
+    """When a CVE is provided and related, driver sources should be fetched."""
+    fetched: dict = {}
+
+    def fake_run_cve_check(cve_id, peripheral_name, mcu_name):
+        return {
+            "valid_format": True,
+            "disclosed": True,
+            "related": True,
+            "warnings": [],
+            "poc_findings": [],
+        }
+
+    def fake_fetch_cve_driver_sources(cve_id, peripheral_name, mcu_name, output_dir):
+        fetched["cve_id"] = cve_id
+        fetched["peripheral"] = peripheral_name
+        fetched["output_dir"] = output_dir
+        return {"downloaded": [{"path": "demo.c", "url": "https://example.com/demo.c", "title": "demo"}], "count": 1}
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "downloaded": []}
+
+    def fake_do_build(self, **kwargs):
+        return {"success": True, "generated_files": []}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
+
+    def fake_do_test(self, **kwargs):
+        return {"success": True, "skipped": False, "reason": ""}
+
+    monkeypatch.setattr("autoemu.cve_validator.run_cve_check", fake_run_cve_check)
+    monkeypatch.setattr("autoemu.cve_validator.fetch_cve_driver_sources", fake_fetch_cve_driver_sources)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        cve_id="CVE-2021-1234",
+    )
+
+    assert result.success is True
+    assert fetched["cve_id"] == "CVE-2021-1234"
+    assert fetched["peripheral"] == "ETH"
+    assert "driver/cve" in fetched["output_dir"]
+
+
+def test_run_pipeline_cve_poc_probe_integration(monkeypatch):
+    """When a CVE has PoC findings, phase 5 should include poc_results."""
+
+    def fake_do_fetch(self, **kwargs):
+        return {"success": True, "downloaded": []}
+
+    def fake_do_build(self, **kwargs):
+        return {"success": True, "generated_files": ["output/hikey960_gpu.c"]}
+
+    def fake_do_validate(self, output_dir, **kwargs):
+        return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
+
+    def fake_do_test(self, *, cve_findings=None, **kwargs):
+        poc_results = []
+        if cve_findings and cve_findings.get("poc_findings"):
+            poc_results = [{"title": "PoC", "success": True, "url": "https://example.com/poc.c"}]
+        return {
+            "success": True,
+            "skipped": False,
+            "reason": "",
+            "poc_results": poc_results,
+        }
+
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime.run_pipeline(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        cve_id="CVE-2021-1234",
+    )
+
+    assert result.success is True
+    assert "poc_results" in result.probe_result
+    assert len(result.probe_result["poc_results"]) == 1
+    assert result.probe_result["poc_results"][0]["success"] is True

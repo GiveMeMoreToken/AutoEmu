@@ -7,7 +7,10 @@ import logging
 import re
 from typing import Any
 
-from autoemu.fetchers.generic import DuckDuckGoSearcher, _urlopen_with_retry
+from pathlib import Path
+from urllib.parse import urlparse
+
+from autoemu.fetchers.generic import DuckDuckGoSearcher, _urlopen_with_retry, _check_content
 from autoemu.platforms import analyze_target
 
 logger = logging.getLogger(__name__)
@@ -254,3 +257,90 @@ def run_cve_check(
     summary["poc_findings"] = search_cve_poc(cve_id, peripheral_name, mcu_name)
 
     return summary
+
+
+def fetch_cve_driver_sources(
+    cve_id: str,
+    peripheral_name: str = "",
+    mcu_name: str = "",
+    output_dir: str | Path = "",
+) -> dict[str, Any]:
+    """Search for and download driver source code related to a CVE.
+
+    Returns a dict with:
+    - ``downloaded``: list of dicts with ``path``, ``url``, and ``title`` keys
+    - ``count``: int
+    Files are written to ``<output_dir>/driver/cve/``.
+    """
+    out = Path(output_dir) / "driver" / "cve"
+    out.mkdir(parents=True, exist_ok=True)
+
+    searcher = DuckDuckGoSearcher(user_agent="AutoEmu/0.1")
+    queries: list[tuple[str, str]] = [
+        (f"{cve_id} linux driver source", "cve_driver"),
+        (f"{cve_id} patch linux kernel", "cve_patch"),
+    ]
+    if peripheral_name:
+        queries.append((f"{peripheral_name} driver linux kernel source", "periph_driver"))
+    if mcu_name:
+        queries.append((f"{mcu_name} {peripheral_name} driver source", "mcu_driver"))
+
+    downloaded: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    for query, category in queries:
+        if len(downloaded) >= 3:
+            break
+        try:
+            results = searcher.search(query, max_results=5)
+        except Exception as exc:
+            logger.warning("CVE driver search failed for %r: %s", query, exc)
+            continue
+
+        for result in results:
+            if len(downloaded) >= 3:
+                break
+            url = result.url
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            # Only attempt raw source URLs (GitHub raw, kernel.org, etc.)
+            parsed = urlparse(url)
+            path_str = parsed.path
+            # Convert GitHub blob URLs to raw URLs first
+            if "github.com" in parsed.netloc and "/blob/" in path_str:
+                raw_url = url.replace("/blob/", "/raw/", 1)
+            else:
+                raw_url = url
+            if not Path(path_str).suffix.lower() in (".c", ".h"):
+                continue
+
+            filename = Path(path_str).name
+            if not filename.endswith((".c", ".h")):
+                continue
+
+            try:
+                from urllib.request import Request
+                request = Request(raw_url, headers={"User-Agent": "AutoEmu/0.1"})
+                with _urlopen_with_retry(request, timeout=15) as response:
+                    data = response.read()
+            except Exception as exc:
+                logger.debug("Failed to download %s: %s", raw_url, exc)
+                continue
+
+            reason = _check_content(data, "driver", filename)
+            if reason:
+                logger.debug("Skipped %s: %s", filename, reason)
+                continue
+
+            dest = out / filename
+            dest.write_bytes(data)
+            downloaded.append({
+                "path": str(dest),
+                "url": raw_url,
+                "title": result.title,
+            })
+            logger.info("Downloaded CVE driver source: %s", dest)
+
+    return {"downloaded": downloaded, "count": len(downloaded)}

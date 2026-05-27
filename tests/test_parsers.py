@@ -564,3 +564,69 @@ int outer_only = 1;
         )
         assert "MY" in result
         assert result["MY"].base_address == 0x40000100
+
+
+class TestLinuxDriverParser:
+    """Test recognition of Linux kernel driver patterns (readl/writel, custom wrappers)."""
+
+    def test_readl_writel_extraction(self):
+        analysis = analyze_driver_string(
+            """\
+static int panfrost_gpu_init(struct panfrost_device *pfdev)
+{
+    u32 id = gpu_read(pfdev, GPU_ID);
+    u32 present = readl(pfdev->iomem + GPU_SHADER_PRESENT_LO);
+    gpu_write(pfdev, GPU_INT_MASK, 0);
+    writel(ALL_JS_INT_MASK, pfdev->iomem + JOB_INT_MASK);
+}
+""",
+            "GPU",
+        )
+        regs = [a.register for a in analysis.register_accesses]
+        assert "GPU_ID" in regs
+        assert "GPU_SHADER_PRESENT_LO" in regs
+        assert "GPU_INT_MASK" in regs
+        assert "JOB_INT_MASK" in regs
+
+    def test_linux_irq_handler_extraction(self):
+        analysis = analyze_driver_string(
+            """\
+static irqreturn_t panfrost_jm_irq_handler(int irq, void *data)
+{
+    struct panfrost_device *pfdev = data;
+    u32 status = gpu_read(pfdev, JOB_INT_STAT);
+
+    if (status & JOB_INT_MASK_DONE(0))
+        gpu_write(pfdev, JOB_INT_CLEAR, JOB_INT_MASK_DONE(0));
+
+    return IRQ_HANDLED;
+}
+""",
+            "GPU",
+        )
+        assert len(analysis.isr_patterns) == 1
+        isr = analysis.isr_patterns[0]
+        assert "JOB_INT_MASK_DONE" in isr.checked_flags
+        assert "JOB_INT_MASK_DONE" in isr.cleared_flags
+        accesses = isr.register_accesses
+        assert any(a.register == "JOB_INT_STAT" for a in accesses)
+        assert any(a.register == "JOB_INT_CLEAR" for a in accesses)
+
+    def test_linux_init_sequence_extraction(self):
+        analysis = analyze_driver_string(
+            """\
+static int panfrost_device_init(struct panfrost_device *pfdev)
+{
+    writel(0, pfdev->iomem + GPU_INT_CLEAR);
+    writel(ALL_JS_INT_MASK, pfdev->iomem + JOB_INT_MASK);
+    gpu_write(pfdev, JS_COMMAND_NEXT(0), JS_COMMAND_START);
+}
+""",
+            "GPU",
+        )
+        assert len(analysis.init_sequences) >= 1
+        init = analysis.init_sequences[0]
+        regs = [a.register for a in init.accesses]
+        assert "GPU_INT_CLEAR" in regs
+        assert "JOB_INT_MASK" in regs
+        assert "JS_COMMAND_NEXT" in regs

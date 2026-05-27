@@ -39,8 +39,8 @@ SDK backend. Do not use old aliases such as `claude`, `codex`, or `openai`.
 - `src/autoemu/fetchers/`: web discovery, download, cache, input resolution.
 - `src/autoemu/parsers/`: SVD/header/driver parsing and register extraction.
 - `src/autoemu/inference/`: state machine, interrupt, and dependency inference.
-- `src/autoemu/generators/`: QEMU C/H, Meson, and QTest output.
-- `src/autoemu/validators/`: register, behavior, compile, replay, and security checks.
+- `src/autoemu/generators/`: QEMU C/H, Meson, QTest, standalone, and fuzz output.
+- `src/autoemu/validators/`: register, behavior, compile, replay, security, and QEMU driver-probing checks.
 - `src/autoemu/platforms/`: STM32, MIPS, and generic platform plugins.
 
 Keep inference and data models generic. Platform plugins may describe input
@@ -75,6 +75,15 @@ and generators must not grow board-specific or GPU-family-specific branches.
 - Include `hw/sysbus.h` for `SysBusDevice` access (QEMU 9.2 compatible).
 - Include `hw/qdev-properties.h` for `DeviceClass` access (QEMU 9.2 compatible).
 
+## Pipeline Phases
+
+The unified runtime executes 5 phases:
+1. Detecting platform
+2. Fetching input data (includes CVE driver source fetch when a CVE is provided)
+3. Building QEMU peripheral model
+4. Validating generated code (compile check against QEMU headers)
+5. Testing driver probing (targeted ninja rebuild in QEMU build env — soft-fail)
+
 ## 2026-05-20 Handoff Notes
 
 - Logs `autoemu_20260520_203850.log` and `autoemu_20260520_223725.log` showed
@@ -97,3 +106,5 @@ and generators must not grow board-specific or GPU-family-specific branches.
   DTS/DTSI `reg = <...>` entry drives nonzero `base_address` and `address_size`.
 - For fetch changes, include tests that ensure DTS/DTSI docs are requested,
   resolved from `docs/`, and not dropped by candidate selection.
+- For phase-5 (probe) changes, include tests that verify soft-fail behavior
+  when the QEMU build environment is missing or ninja fails.

@@ -242,10 +242,12 @@ async def _build_peripheral_model(args: dict[str, Any]) -> dict[str, Any]:
         ptype = PeripheralType(args.get("peripheral_type", "generic"))
         base_addr = int(args.get("base_address", "0"), 0)
 
+        addr_size = int(args.get("address_size", "0"), 0)
         peripheral = Peripheral(
             name=args["name"],
             peripheral_type=ptype,
             base_address=base_addr,
+            address_size=addr_size,
             register_block=reg_block,
             mcu_family=args.get("mcu_family", ""),
         )
@@ -601,6 +603,7 @@ ALL_TOOLS: list[ToolSpec] = [
         parameters={
             "name": str, "peripheral_type": str, "register_block_json": str,
             "base_address": str, "mcu_family": str,
+            "address_size": str,
         },
         handler=_build_peripheral_model,
     ),

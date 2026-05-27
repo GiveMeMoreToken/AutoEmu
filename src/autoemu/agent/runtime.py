@@ -7,6 +7,9 @@ import inspect
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +49,7 @@ PIPELINE_PHASES = [
     "Fetching input data",
     "Building QEMU peripheral model",
     "Validating generated code",
+    "Testing driver probing",
 ]
 
 
@@ -74,6 +78,7 @@ class PipelineResult:
     fetch_result: dict[str, Any] = field(default_factory=dict)
     build_result: dict[str, Any] = field(default_factory=dict)
     validation_result: dict[str, Any] = field(default_factory=dict)
+    probe_result: dict[str, Any] = field(default_factory=dict)
     generated_files: list[str] = field(default_factory=list)
     test_commands: list[str] = field(default_factory=list)
     cve_findings: dict[str, Any] = field(default_factory=dict)
@@ -467,6 +472,22 @@ class AutoEmuAgentRuntime:
                 except Exception:
                     pass
 
+                # Fetch CVE-related driver sources for modeling enrichment
+                if cve_summary.get("related"):
+                    from autoemu.cve_validator import fetch_cve_driver_sources
+                    _emit(1, f"Fetching CVE-related driver sources for {target_peripheral} ...", "search")
+                    cve_driver_dir = f"{data_dir}/driver/cve"
+                    cve_driver_result = fetch_cve_driver_sources(
+                        cve_id,
+                        peripheral_name=target_peripheral,
+                        mcu_name=target_mcu,
+                        output_dir=cve_driver_dir,
+                    )
+                    if cve_driver_result.get("downloaded"):
+                        _emit(1, f"Downloaded {len(cve_driver_result['downloaded'])} CVE driver file(s)", "info")
+                    else:
+                        _emit(1, "No CVE driver sources found (continuing with existing inputs)", "warn")
+
             # Phase 2 — fetch
             _emit(2, "Searching the web for input data ...", "search")
 
@@ -532,6 +553,27 @@ class AutoEmuAgentRuntime:
             agent_errors = _phase_agent_errors(fetch_result, build_result)
             for agent_error in agent_errors:
                 _emit(4, agent_error, "warn" if ok else "fail")
+
+            # Phase 5 — test driver probing (soft-fail: warn on failure)
+            _emit(5, "Testing driver probing ...", "compile")
+
+            def _emit_test(msg: str, kind: str = "info") -> None:
+                _emit(5, msg, kind)
+
+            probe_result = self._do_test(
+                target_mcu=target_mcu,
+                target_peripheral=target_peripheral,
+                output_dir=output_dir,
+                cve_findings=result.cve_findings,
+                on_progress=_emit_test,
+            )
+            result.probe_result = probe_result
+            if probe_result.get("success"):
+                _emit(5, "Probe test: PASS", "info")
+            elif probe_result.get("skipped"):
+                _emit(5, f"Probe test: SKIPPED — {probe_result.get('reason', '')}", "warn")
+            else:
+                _emit(5, f"Probe test: WARN — {probe_result.get('reason', '')}", "warn")
 
             failure_reasons: list[str] = []
             if not ok:
@@ -895,6 +937,26 @@ class AutoEmuAgentRuntime:
         if extra_warnings:
             compile_result["success"] = False
         return compile_result
+
+    def _do_test(
+        self,
+        target_mcu: str,
+        target_peripheral: str,
+        output_dir: str = "output",
+        cve_findings: dict[str, Any] | None = None,
+        on_progress: Callable[[str, str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Phase 5: attempt a QEMU driver-probing build (soft-fail)."""
+        from autoemu.validators.qemu_probe_validator import run_qemu_probe
+
+        return run_qemu_probe(
+            output_dir=output_dir,
+            target_mcu=target_mcu,
+            target_peripheral=target_peripheral,
+            qemu_build_env=None,
+            cve_findings=cve_findings,
+            on_progress=on_progress,
+        )
 
     def _count_fetched(self, fetch_result: dict[str, Any]) -> int:
         if "downloaded" in fetch_result:

@@ -117,11 +117,13 @@ _RE_IT_CHECK = re.compile(
     r"__HAL_(\w+)_GET_IT_SOURCE\s*\(\s*\w+\s*,\s*(\w+)\s*\)"
 )
 _RE_FUNC_DEF = re.compile(
-    r"^(?:HAL_StatusTypeDef|void|static\s+void|static\s+HAL_StatusTypeDef)"
-    r"\s+(HAL_\w+|LL_\w+)\s*\(",
+    r"^(?:HAL_StatusTypeDef|void|static\s+void|static\s+HAL_StatusTypeDef|"
+    r"static\s+irqreturn_t|irqreturn_t|static\s+int|static\s+uint32_t)"
+    r"\s+(HAL_\w+|LL_\w+|\w+_irq_handler|\w+_handler|\w+_init|\w+_probe|\w+_fini)\s*\(",
     re.MULTILINE,
 )
 _RE_ISR_FUNC = re.compile(
+    r"(?:static\s+)?irqreturn_t\s+(\w+_irq_handler)\s*\(|"
     r"void\s+(HAL_\w+_IRQHandler|(\w+)_IRQHandler)\s*\(",
     re.MULTILINE,
 )
@@ -139,6 +141,51 @@ _RE_CLEAR_CALL = re.compile(
     re.DOTALL,
 )
 
+# Linux kernel MMIO patterns (readl/writel and custom wrappers)
+_RE_READL = re.compile(
+    r"(?:(\w+)\s*=\s*)?readl\s*\(\s*(.+?)\s*\)\s*;"
+)
+_RE_WRITEL = re.compile(
+    r"writel\s*\(\s*(.+?)\s*,\s*(.+?)\s*\)\s*;"
+)
+_RE_CUSTOM_READ = re.compile(
+    r"(?:(\w+)\s*=\s*)?(\w+)_read\s*\(\s*[^,]+\s*,\s*(\w+(?:\s*\([^)]*\))?)\s*\)\s*;"
+)
+_RE_CUSTOM_WRITE = re.compile(
+    r"(\w+)_write\s*\(\s*[^,]+\s*,\s*(\w+(?:\s*\([^)]*\))?)\s*,\s*(.+?)\s*\)\s*;"
+)
+
+
+def _extract_register_from_mmio_expr(expr: str) -> str:
+    """Extract a register name from an MMIO address expression.
+
+    Handles patterns like:
+    - ``dev->iomem + REG_MACRO``
+    - ``dev->regs + REG_MACRO``
+    - ``base + REG_MACRO``
+    - ``REG_MACRO(idx)``
+    - ``REG_MACRO``
+
+    Returns the register macro name or an empty string.
+    """
+    expr = expr.strip()
+    # Look for the last '+' which typically separates base from offset
+    if "+" in expr:
+        parts = expr.rsplit("+", 1)
+        candidate = parts[-1].strip()
+    else:
+        candidate = expr
+    # Remove casts like (void __iomem *)
+    candidate = re.sub(r"\([^)]+\)", "", candidate).strip()
+    # Strip array/index macro suffix: REG_NAME(0) -> REG_NAME
+    candidate = re.sub(r"\s*\([^)]*\)\s*$", "", candidate).strip()
+    # Valid register names are ALL_CAPS macros or camelCase identifiers
+    if re.match(r"^[A-Z][A-Z0-9_]*$", candidate):
+        return candidate
+    if re.match(r"^[a-z][a-zA-Z0-9_]*$", candidate):
+        return candidate
+    return ""
+
 
 def _unique_in_order(values: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -154,6 +201,11 @@ def _unique_in_order(values: list[str]) -> list[str]:
 def _looks_like_enable_register(register_name: str) -> bool:
     normalized = register_name.upper()
     return any(token in normalized for token in ("IER", "IMR", "MSK", "MASK", "CR"))
+
+
+def _looks_like_clear_register(register_name: str) -> bool:
+    normalized = register_name.upper()
+    return any(token in normalized for token in ("CLEAR", "ICR", "IC", "ACK", "PENDING"))
 
 
 def _extract_function_bodies(content: str) -> dict[str, str]:
@@ -259,6 +311,50 @@ def _extract_register_accesses(
                 source_file=source_file, in_function=func_name, context=context,
             ))
 
+    # Linux readl/writel
+    for m in _RE_READL.finditer(body):
+        dst = m.group(1) or ""
+        addr_expr = m.group(2)
+        reg = _extract_register_from_mmio_expr(addr_expr)
+        if reg:
+            accesses.append(RegisterAccess(
+                register=reg, access_type="read",
+                value_expr=dst,
+                source_file=source_file, in_function=func_name, context=context,
+            ))
+
+    for m in _RE_WRITEL.finditer(body):
+        value_expr = m.group(1)
+        addr_expr = m.group(2)
+        reg = _extract_register_from_mmio_expr(addr_expr)
+        if reg:
+            accesses.append(RegisterAccess(
+                register=reg, access_type="write",
+                value_expr=value_expr,
+                source_file=source_file, in_function=func_name, context=context,
+            ))
+
+    # Custom wrapper macros like gpu_write(dev, REG, data)
+    for m in _RE_CUSTOM_READ.finditer(body):
+        dst = m.group(1) or ""
+        reg = _extract_register_from_mmio_expr(m.group(3))
+        if reg:
+            accesses.append(RegisterAccess(
+                register=reg, access_type="read",
+                value_expr=dst,
+                source_file=source_file, in_function=func_name, context=context,
+            ))
+
+    for m in _RE_CUSTOM_WRITE.finditer(body):
+        reg = _extract_register_from_mmio_expr(m.group(2))
+        value_expr = m.group(3)
+        if reg:
+            accesses.append(RegisterAccess(
+                register=reg, access_type="write",
+                value_expr=value_expr,
+                source_file=source_file, in_function=func_name, context=context,
+            ))
+
     return accesses
 
 
@@ -292,6 +388,42 @@ def _extract_isr_pattern(
             if symbol.startswith("__HAL_"):
                 continue
             pattern.cleared_flags.append(symbol)
+
+    # Linux-style: readl into variable, then mask-check
+    # e.g. u32 status = readl(dev->iomem + GPU_INT_STAT); if (status & FLAG) { ... }
+    for m in _RE_READL.finditer(body):
+        dst = m.group(1)
+        addr_expr = m.group(2)
+        if dst:
+            reg = _extract_register_from_mmio_expr(addr_expr)
+            if reg:
+                read_reg_aliases[dst] = reg
+
+    # Linux-style direct mask checks: if (status & FLAG) or while (status & FLAG)
+    for m in re.finditer(r"(?:if|while)\s*\(\s*(?:\(\s*)?(\w+)\s*&\s*([A-Z][A-Z0-9_]+)", body):
+        alias = m.group(1)
+        symbol = m.group(2)
+        if _looks_like_enable_register(read_reg_aliases.get(alias, "")):
+            pattern.enabled_checks.append(symbol)
+        else:
+            pattern.checked_flags.append(symbol)
+
+    # Linux-style clear via writel/gpu_write to a CLEAR register
+    for m in _RE_WRITEL.finditer(body):
+        value_expr = m.group(1)
+        addr_expr = m.group(2)
+        reg = _extract_register_from_mmio_expr(addr_expr)
+        if reg and _looks_like_clear_register(reg):
+            symbols = re.findall(r"\b[A-Z][A-Z0-9_]+\b", value_expr)
+            for symbol in symbols:
+                pattern.cleared_flags.append(symbol)
+    for m in _RE_CUSTOM_WRITE.finditer(body):
+        reg = m.group(2)
+        value_expr = m.group(3)
+        if reg and _looks_like_clear_register(reg):
+            symbols = re.findall(r"\b[A-Z][A-Z0-9_]+\b", value_expr)
+            for symbol in symbols:
+                pattern.cleared_flags.append(symbol)
 
     pattern.checked_flags = _unique_in_order(pattern.checked_flags)
     pattern.cleared_flags = _unique_in_order(pattern.cleared_flags)
@@ -362,7 +494,7 @@ def analyze_driver_file(path: str | Path, peripheral_name: str = "") -> DriverAn
         accesses = _extract_register_accesses(body, func_name, source_file, peripheral_name)
         analysis.register_accesses.extend(accesses)
 
-        if "IRQHandler" in func_name or "isr" in func_name.lower():
+        if "IRQHandler" in func_name or "irq_handler" in func_name.lower():
             isr = _extract_isr_pattern(body, func_name, peripheral_name)
             isr.register_accesses = accesses
             analysis.isr_patterns.append(isr)
@@ -425,7 +557,7 @@ def analyze_driver_string(content: str, peripheral_name: str = "") -> DriverAnal
         accesses = _extract_register_accesses(body, func_name, "<string>", peripheral_name)
         analysis.register_accesses.extend(accesses)
 
-        if "IRQHandler" in func_name or "isr" in func_name.lower():
+        if "IRQHandler" in func_name or "irq_handler" in func_name.lower():
             isr = _extract_isr_pattern(body, func_name, peripheral_name)
             isr.register_accesses = accesses
             analysis.isr_patterns.append(isr)
