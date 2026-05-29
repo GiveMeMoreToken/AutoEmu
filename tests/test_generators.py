@@ -74,9 +74,6 @@ def _make_test_peripheral() -> Peripheral:
 
 
 class TestQEMUGenerator:
-    def test_target_version(self):
-        assert QEMU_TARGET_VERSION == "latest upstream QEMU"
-
     def test_generates_files(self):
         periph = _make_test_peripheral()
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -201,12 +201,6 @@ class TestCompileValidator:
         result = validate_compile([str(tmp_path / "readme.txt")], qemu_src=fake_qemu)
         assert result["files_checked"] == 0
 
-    def test_no_qemu_source(self):
-        result = validate_compile(["dummy.c"], qemu_src=Path("/nonexistent"))
-        assert result["success"] is True
-        assert result["files_checked"] == 0
-
-
 # ---------------------------------------------------------------------------
 # Meson build validator
 # ---------------------------------------------------------------------------

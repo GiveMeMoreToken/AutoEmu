@@ -166,9 +166,8 @@ def run_qemu_probe(
         cmd = [
             shutil.which("python3") or "python",
             str(script),
-            "--output-dir", str(output_dir),
+            str(output_dir),
             "--qemu-src", str(qemu_src),
-            "--peripheral", target_peripheral,
         ]
         try:
             proc_apply = subprocess.run(
