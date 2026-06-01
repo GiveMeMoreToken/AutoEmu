@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+from collections import deque
 from collections.abc import Callable
+from threading import Lock
 from typing import Any
 
 from textual import work
@@ -14,6 +17,8 @@ from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from autoemu.tui.widgets import LogPanel, PipelinePhaseList
 
+
+logger = logging.getLogger(__name__)
 
 BANNER = (
     "     _         _        _____                 " "\n"
@@ -53,29 +58,53 @@ def _final_phase_status_actions(result) -> list[tuple[str, int]]:
     return actions
 
 
-class UiThreadCall(Message, bubble=False):
-    """Message carrying a widget update from a worker thread to the UI thread."""
-
-    def __init__(
-        self,
-        callback: Callable[..., Any],
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__()
-        self.callback = callback
-        self.args = args
-        self.kwargs = kwargs or {}
+class UiThreadQueueReady(Message, bubble=False):
+    """Message requesting a UI-thread drain of queued worker updates."""
 
 
 def _post_ui_call(app, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Queue a UI-thread callback without blocking the pipeline worker."""
-    app.post_message(UiThreadCall(callback, args, kwargs))
+    """Queue a UI-thread callback without flooding Textual wakeups."""
+    _ensure_ui_call_queue(app)
+    lock: Lock = app._autoemu_ui_call_lock
+    with lock:
+        app._autoemu_ui_call_queue.append((callback, args, kwargs))
+        if app._autoemu_ui_call_scheduled:
+            return
+        app._autoemu_ui_call_scheduled = True
+    app.post_message(UiThreadQueueReady())
 
 
-def _run_ui_thread_call(message: UiThreadCall) -> None:
-    """Execute a queued UI-thread callback."""
-    message.callback(*message.args, **message.kwargs)
+def _ensure_ui_call_queue(app) -> None:
+    """Create worker-to-UI queue state lazily for tests and the real app."""
+    if hasattr(app, "_autoemu_ui_call_queue"):
+        return
+    app._autoemu_ui_call_queue = deque()
+    app._autoemu_ui_call_lock = Lock()
+    app._autoemu_ui_call_scheduled = False
+
+
+def _drain_ui_call_queue(app, *, limit: int = 200) -> None:
+    """Run queued UI callbacks in bounded batches on the UI thread."""
+    _ensure_ui_call_queue(app)
+    processed = 0
+    while processed < limit:
+        with app._autoemu_ui_call_lock:
+            if not app._autoemu_ui_call_queue:
+                app._autoemu_ui_call_scheduled = False
+                return
+            callback, args, kwargs = app._autoemu_ui_call_queue.popleft()
+        try:
+            callback(*args, **kwargs)
+        except Exception:
+            logger.exception("UI update failed")
+        processed += 1
+
+    with app._autoemu_ui_call_lock:
+        if app._autoemu_ui_call_queue:
+            app._autoemu_ui_call_scheduled = True
+            app.post_message(UiThreadQueueReady())
+        else:
+            app._autoemu_ui_call_scheduled = False
 
 
 def _save_log_from_ui(log: LogPanel) -> None:
@@ -319,9 +348,9 @@ class AutoEmuApp(App):
         Binding("ctrl+l", "save_log", "Save log", show=True),
     ]
 
-    def on_ui_thread_call(self, message: UiThreadCall) -> None:
-        """Run a callback queued by a worker thread."""
-        _run_ui_thread_call(message)
+    def on_ui_thread_queue_ready(self, message: UiThreadQueueReady) -> None:
+        """Drain callbacks queued by worker threads."""
+        _drain_ui_call_queue(self)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

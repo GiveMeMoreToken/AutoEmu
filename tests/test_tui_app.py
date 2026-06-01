@@ -37,9 +37,9 @@ def test_final_phase_status_marks_probe_done_on_success():
     assert ("set_phase_done", 5) in actions
 
 
-def test_schedule_progress_update_posts_nonblocking_ui_messages():
-    """Worker-thread progress must not block on Textual UI rendering."""
-    messages: list[tui_app.UiThreadCall] = []
+def test_schedule_progress_update_coalesces_worker_wakeups():
+    """Worker-thread progress must not flood Textual's message pump."""
+    messages: list[tui_app.UiThreadQueueReady] = []
     log_messages: list[tuple[str, str]] = []
     phase_updates: list[int] = []
 
@@ -66,16 +66,45 @@ def test_schedule_progress_update_posts_nonblocking_ui_messages():
         kind="compile",
     )
 
-    tui_app._schedule_progress_update(FakeApp(), FakePhases(), FakeLog(), progress)
+    app = FakeApp()
+    tui_app._schedule_progress_update(app, FakePhases(), FakeLog(), progress)
+    tui_app._schedule_progress_update(app, FakePhases(), FakeLog(), progress)
 
-    assert len(messages) == 2
+    assert len(messages) == 1
     assert phase_updates == []
     assert log_messages == []
 
-    for message in messages:
-        tui_app._run_ui_thread_call(message)
+    tui_app._drain_ui_call_queue(app)
 
-    assert phase_updates == [5]
+    assert phase_updates == [5, 5]
     assert log_messages == [
-        ("Stage 5 command: ninja -C build qemu-system-aarch64", "compile")
+        ("Stage 5 command: ninja -C build qemu-system-aarch64", "compile"),
+        ("Stage 5 command: ninja -C build qemu-system-aarch64", "compile"),
     ]
+
+
+def test_ui_call_queue_continues_after_callback_error(caplog):
+    """A bad log callback must not kill the Textual event loop."""
+    messages: list[tui_app.UiThreadQueueReady] = []
+    calls: list[str] = []
+
+    class FakeApp:
+        def post_message(self, message):
+            messages.append(message)
+            return True
+
+    def bad_callback():
+        raise RuntimeError("log write failed")
+
+    def good_callback():
+        calls.append("good")
+
+    app = FakeApp()
+    tui_app._post_ui_call(app, bad_callback)
+    tui_app._post_ui_call(app, good_callback)
+
+    assert len(messages) == 1
+    tui_app._drain_ui_call_queue(app)
+
+    assert calls == ["good"]
+    assert "UI update failed" in caplog.text
