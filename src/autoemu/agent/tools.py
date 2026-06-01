@@ -20,7 +20,7 @@ from autoemu.parsers.driver_parser import (
     analyze_driver_string,
     DriverAnalysis,
 )
-from autoemu.fetchers.generic import GenericDataFetcher
+from autoemu.fetchers.generic import GenericDataFetcher, collect_cached_input_artifacts
 from autoemu.generators.bundle_generator import generate_model_bundle
 from autoemu.inference.dependency_inference import infer_dependency_graph
 from autoemu.inference.interrupt_inference import infer_interrupt_model
@@ -50,14 +50,27 @@ def _err(text: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"Error: {text}"}], "is_error": True}
 
 
-def _load_json_arg(args: dict[str, Any], key: str) -> Any:
+def _load_json_arg(args: dict[str, Any], key: str, default: Any = None) -> Any:
     """Load JSON from inline string or file path."""
-    raw = args.get(key, "")
-    if not raw or raw == "null":
-        return None
-    if raw.startswith("{"):
-        return json.loads(raw)
-    return json.loads(Path(raw).read_text(encoding="utf-8"))
+    raw = args.get(key, default)
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, (dict, list)):
+        return raw
+
+    text = str(raw).strip()
+    if not text or text == "null":
+        return default
+    if text[:1] in ("{", "["):
+        return json.loads(text)
+
+    try:
+        path = Path(text)
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    return json.loads(text)
 
 
 def _format_driver_analysis(analysis: DriverAnalysis) -> str:
@@ -173,7 +186,7 @@ async def _analyze_driver_text(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _infer_state_machine(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        analysis_data = json.loads(args["driver_analysis_json"])
+        analysis_data = _load_json_arg(args, "driver_analysis_json")
         documentation_text = args.get("documentation_text", "")
         sm = infer_state_machine(
             analysis_data,
@@ -192,8 +205,8 @@ async def _infer_state_machine(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _infer_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        analysis_data = json.loads(args["driver_analysis_json"])
-        register_blocks_data = json.loads(args.get("register_blocks_json", "{}"))
+        analysis_data = _load_json_arg(args, "driver_analysis_json")
+        register_blocks_data = _load_json_arg(args, "register_blocks_json", {})
         peripheral_name = args.get("peripheral_name", "")
         model = infer_interrupt_model(
             analysis_data,
@@ -212,9 +225,9 @@ async def _infer_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _infer_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        analysis_data = json.loads(args["driver_analysis_json"])
+        analysis_data = _load_json_arg(args, "driver_analysis_json")
         documentation_text = args.get("documentation_text", "")
-        interrupt_model_data = json.loads(args.get("interrupt_model_json", "null"))
+        interrupt_model_data = _load_json_arg(args, "interrupt_model_json")
         peripheral_name = args.get("peripheral_name", "")
         mcu_name = args.get("mcu_name", "")
 
@@ -238,7 +251,7 @@ async def _infer_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _build_peripheral_model(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        reg_block = RegisterBlock.model_validate_json(args["register_block_json"])
+        reg_block = RegisterBlock.model_validate(_load_json_arg(args, "register_block_json"))
         ptype = PeripheralType(args.get("peripheral_type", "generic"))
         base_addr = int(args.get("base_address", "0"), 0)
 
@@ -258,8 +271,8 @@ async def _build_peripheral_model(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _build_state_machine(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        states_data = json.loads(args["states_json"])
-        trans_data = json.loads(args["transitions_json"])
+        states_data = _load_json_arg(args, "states_json")
+        trans_data = _load_json_arg(args, "transitions_json")
 
         states = [State.model_validate(s) for s in states_data]
         transitions = [Transition.model_validate(t) for t in trans_data]
@@ -281,8 +294,8 @@ async def _build_state_machine(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _build_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        lines_data = json.loads(args["lines_json"])
-        event_map = json.loads(args.get("event_map_json", "{}"))
+        lines_data = _load_json_arg(args, "lines_json")
+        event_map = _load_json_arg(args, "event_map_json", {})
 
         lines = [InterruptLine.model_validate(line_data) for line_data in lines_data]
 
@@ -299,7 +312,7 @@ async def _build_interrupt_model(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _build_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        edges_data = json.loads(args["edges_json"])
+        edges_data = _load_json_arg(args, "edges_json")
         edges = [DependencyEdge.model_validate(e) for e in edges_data]
 
         graph = DependencyGraph(mcu_name=args["mcu_name"], edges=edges)
@@ -316,13 +329,7 @@ async def _build_dependency_graph(args: dict[str, Any]) -> dict[str, Any]:
 
 async def _generate_model_bundle(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        # Accept either inline JSON or a file path to avoid huge tool arguments
-        rb_raw = args.get("register_blocks_json", "")
-        if rb_raw.startswith("{"):
-            register_blocks_data = json.loads(rb_raw)
-        else:
-            register_blocks_data = json.loads(Path(rb_raw).read_text(encoding="utf-8"))
-
+        register_blocks_data = _load_json_arg(args, "register_blocks_json")
         state_machine_data = _load_json_arg(args, "state_machine_json")
         interrupt_model_data = _load_json_arg(args, "interrupt_model_json")
         dependency_graph_data = _load_json_arg(args, "dependency_graph_json")
@@ -371,7 +378,7 @@ async def _generate_qemu_peripheral(args: dict[str, Any]) -> dict[str, Any]:
     try:
         from autoemu.generators.qemu_generator import generate_peripheral_code
 
-        peripheral = Peripheral.model_validate_json(args["peripheral_json"])
+        peripheral = Peripheral.model_validate(_load_json_arg(args, "peripheral_json"))
         output_dir = Path(args.get("output_dir", "output"))
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -388,7 +395,7 @@ async def _validate_register_model(args: dict[str, Any]) -> dict[str, Any]:
     try:
         from autoemu.validators.register_validator import validate_register_block
 
-        block = RegisterBlock.model_validate_json(args["register_block_json"])
+        block = RegisterBlock.model_validate(_load_json_arg(args, "register_block_json"))
         issues = validate_register_block(block)
 
         if not issues:
@@ -405,8 +412,8 @@ async def _validate_behavior(args: dict[str, Any]) -> dict[str, Any]:
     try:
         from autoemu.validators.behavior_validator import validate_behavior
 
-        peripheral = Peripheral.model_validate_json(args["peripheral_json"])
-        analysis_data = json.loads(args["driver_analysis_json"])
+        peripheral = Peripheral.model_validate(_load_json_arg(args, "peripheral_json"))
+        analysis_data = _load_json_arg(args, "driver_analysis_json")
         issues = validate_behavior(peripheral, analysis_data)
 
         if not issues:
@@ -478,6 +485,7 @@ async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
         target_mcu = args["target_mcu"]
         target_peripheral = args["target_peripheral"]
         output_dir = args.get("output_dir", "data")
+        refresh = bool(args.get("refresh", False))
 
         # Use output_dir directly as the data directory — callers already include
         # the MCU-specific path (e.g. "data/hikey960").  Adding the MCU slug here
@@ -496,10 +504,28 @@ async def _fetch_data(args: dict[str, Any]) -> dict[str, Any]:
             selected, data_dir,
             target_mcu=target_mcu, target_peripheral=target_peripheral,
         )
+        downloaded_paths = {
+            str(Path(d["local_path"]))
+            for d in fetch_result.downloaded
+            if d.get("local_path")
+        }
+        reused = []
+        if not refresh:
+            reused = [
+                artifact
+                for artifact in collect_cached_input_artifacts(
+                    target_mcu=target_mcu,
+                    target_peripheral=target_peripheral,
+                    data_dir=data_dir,
+                )
+                if str(Path(artifact["local_path"])) not in downloaded_paths
+            ]
 
         lines = [f"Fetched input data for {target_mcu} / {target_peripheral}"]
         for d in fetch_result.downloaded:
             lines.append(f"  Downloaded: {d['local_path']} ({d['category']})")
+        for d in reused:
+            lines.append(f"  Reused: {d['local_path']} ({d['category']})")
         for e in fetch_result.errors:
             lines.append(f"  Error: {e}")
         return _ok("\n".join(lines))
@@ -718,9 +744,10 @@ ALL_TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="fetch_data",
         description=(
-            "Fetch STM32 input data for one MCU/peripheral target. "
-            "Uses web search plus trusted fallbacks to collect manuals, datasheets, "
-            "SVDs, headers, HAL/LL drivers, and RTOS adaptation sources. "
+            "Fetch input data for one MCU/peripheral target. "
+            "Uses web search to collect source candidates across file types: "
+            "SVDs, driver/header source (.c/.h), documentation (.pdf), and "
+            "device-tree sources (.dts/.dtsi). "
             "Writes manifests under the output directory."
         ),
         parameters={"target_mcu": str, "target_peripheral": str, "output_dir": str, "refresh": bool},

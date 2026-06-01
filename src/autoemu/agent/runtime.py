@@ -19,6 +19,7 @@ from autoemu.agent.orchestrator import AutoEmuOrchestrator, FetchTask, ModelingT
 from autoemu.fetchers.generic import (
     GenericDataFetcher,
     _check_content,
+    collect_cached_input_artifacts,
     infer_stm32_mcu_family,
     resolve_fetched_input_bundle,
 )
@@ -377,6 +378,8 @@ def _clear_output_dir(output_dir: str, _emit: Callable[[int, str, str], None]) -
     _stale_exts = {".c", ".h", ".json", ".txt", ".build", ".snippet"}
     removed = 0
     for fpath in out.iterdir():
+        if _preserve_output_item(fpath):
+            continue
         if fpath.is_file() and fpath.suffix.lower() in _stale_exts:
             fpath.unlink(missing_ok=True)
             removed += 1
@@ -386,6 +389,18 @@ def _clear_output_dir(output_dir: str, _emit: Callable[[int, str, str], None]) -
             removed += 1
     if removed:
         _emit(3, f"Cleared {removed} stale item(s) from {output_dir}", "info")
+
+
+def _preserve_output_item(path: Path) -> bool:
+    """Return true for output artifacts that are reused by later phases."""
+    name = path.name
+    if name == "agent_logs":
+        return True
+    if name == "probe.dtb":
+        return True
+    if name.startswith("probe-") and path.suffix.lower() in {".dtb", ".dtbo", ".dts"}:
+        return True
+    return name.startswith("rootfs-") and name.endswith("-stage5.ext4")
 
 
 def _noop_progress(message: str, kind: str = "info") -> None:
@@ -646,6 +661,22 @@ class AutoEmuAgentRuntime:
         # data/hikey960/{docs,svd,...}.  Move any files found there to the correct
         # location, then delete the stale nested subtree.
         _fix_nested_data_dir(output_dir, _snake(target_mcu), _log)
+        downloaded_paths = {
+            str(Path(d["local_path"]))
+            for d in fetch_result.downloaded
+            if d.get("local_path")
+        }
+        reused = [
+            artifact
+            for artifact in collect_cached_input_artifacts(
+                target_mcu=target_mcu,
+                target_peripheral=target_peripheral,
+                data_dir=output_dir,
+            )
+            if str(Path(artifact["local_path"])) not in downloaded_paths
+        ]
+        for d in reused:
+            _log(f"  Reused cached: {Path(d['local_path']).name} ({d['category']})", "download")
 
         base_result = {
             "target_mcu": target_mcu,
@@ -653,8 +684,9 @@ class AutoEmuAgentRuntime:
             "output_dir": output_dir,
             "platform": platform_name,
             "downloaded": fetch_result.downloaded,
+            "reused": reused,
             "errors": fetch_result.errors,
-            "success": len(fetch_result.downloaded) > 0,
+            "success": bool(fetch_result.downloaded or reused),
         }
 
         try:
@@ -711,7 +743,7 @@ class AutoEmuAgentRuntime:
         out_path = Path(output_dir)
         if out_path.exists():
             for item in out_path.iterdir():
-                if item.name == "agent_logs":
+                if _preserve_output_item(item):
                     continue
                 if item.is_file():
                     item.unlink()

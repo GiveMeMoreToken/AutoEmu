@@ -9,6 +9,7 @@ import pytest
 from autoemu.cve_validator import (
     fetch_cve_driver_sources,
     is_cve_related_to_peripheral,
+    run_cve_check,
     validate_cve_format,
 )
 
@@ -54,6 +55,38 @@ def test_is_cve_related_to_peripheral_unrelated():
         "affected_products": [],
     }
     assert is_cve_related_to_peripheral(details, "UART", "STM32F4") is False
+
+
+def test_run_cve_check_uses_references_when_poc_search_is_empty(monkeypatch):
+    def fake_fetch_cve_details(cve_id):
+        return {
+            "found": True,
+            "cve_id": cve_id,
+            "description": "GPU driver vulnerability in Qualcomm Adreno",
+            "references": [
+                "https://example.com/vendor-advisory",
+                "https://example.com/kernel/commit/fix",
+            ],
+            "affected_products": [],
+            "published": "2022-10-19T11:15:10.387",
+            "error": "",
+        }
+
+    monkeypatch.setattr("autoemu.cve_validator.fetch_cve_details", fake_fetch_cve_details)
+    monkeypatch.setattr("autoemu.cve_validator.search_cve_poc", lambda *args, **kwargs: [])
+
+    result = run_cve_check(
+        "CVE-2022-25664",
+        peripheral_name="GPU",
+        mcu_name="Qualcomm Adreno",
+    )
+
+    assert result["related"] is True
+    assert [finding["url"] for finding in result["poc_findings"]] == [
+        "https://example.com/vendor-advisory",
+        "https://example.com/kernel/commit/fix",
+    ]
+    assert {finding["category"] for finding in result["poc_findings"]} == {"advisory", "patch"}
 
 
 # ---------------------------------------------------------------------------

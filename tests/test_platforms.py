@@ -13,6 +13,7 @@ from autoemu.platforms.base import (
     QEMUTargetInfo,
 )
 from autoemu.platforms.stm32 import STM32Platform
+from autoemu.platforms.generic import GenericPlatform
 from autoemu.fetchers.base import BaseFetcher, FetchManifest
 
 
@@ -77,6 +78,19 @@ def test_stm32_discover_inputs():
     assert all(isinstance(d, AssetDescriptor) for d in descriptors)
     keys = [d.key for d in descriptors]
     assert "reference_manual" in keys or len(keys) > 0
+
+
+def test_generic_discover_inputs_includes_docs_drivers_headers_and_device_tree():
+    platform = GenericPlatform()
+
+    descriptors = platform.discover_inputs("Hikey960", "GPU")
+    extensions = {ext for descriptor in descriptors for ext in descriptor.file_extensions}
+
+    assert ".c" in extensions
+    assert ".h" in extensions
+    assert ".pdf" in extensions
+    assert ".dts" in extensions
+    assert ".dtsi" in extensions
 
 
 def test_stm32_naming_convention():

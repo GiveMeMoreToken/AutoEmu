@@ -202,6 +202,30 @@ def search_cve_poc(
     return findings
 
 
+def _reference_findings(cve_id: str, references: list[str]) -> list[dict[str, str]]:
+    """Convert CVE reference URLs into deterministic advisory/patch findings."""
+    findings: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for url in references:
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        lower = url.lower()
+        category = (
+            "patch"
+            if any(token in lower for token in ("commit", "patch", "git", "android.googlesource"))
+            else "advisory"
+        )
+        findings.append(
+            {
+                "title": f"{cve_id} {category} reference",
+                "url": url,
+                "category": category,
+            }
+        )
+    return findings
+
+
 def run_cve_check(
     cve_id: str,
     peripheral_name: str = "",
@@ -254,7 +278,10 @@ def run_cve_check(
             + " based on description and references."
         )
 
-    summary["poc_findings"] = search_cve_poc(cve_id, peripheral_name, mcu_name)
+    findings = search_cve_poc(cve_id, peripheral_name, mcu_name)
+    if not findings:
+        findings = _reference_findings(cve_id, details.get("references", []))
+    summary["poc_findings"] = findings
 
     return summary
 

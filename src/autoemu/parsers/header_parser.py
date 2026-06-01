@@ -282,6 +282,35 @@ def _infer_access_from_description(description: str, default: AccessType) -> Acc
     return default
 
 
+def _infer_access_from_macro(name: str, description: str) -> AccessType:
+    """Infer access for macro-only register maps when comments are sparse."""
+    described = _infer_access_from_description(description, AccessType.RW)
+    if described != AccessType.RW:
+        return described
+
+    normalized = re.sub(r"_\d+$", "", name.upper())
+    if normalized.endswith(("_INT_CLEAR", "_IRQ_CLEAR", "_INTR_CLEAR")):
+        return AccessType.W1C
+    if normalized.endswith((
+        "_INT_STAT",
+        "_IRQ_STAT",
+        "_INTR_STAT",
+        "_INT_STATUS",
+        "_IRQ_STATUS",
+        "_INTR_STATUS",
+        "_INT_RAWSTAT",
+        "_IRQ_RAWSTAT",
+        "_INTR_RAWSTAT",
+        "_STATUS",
+    )):
+        return AccessType.RO
+
+    tokens = normalized.split("_")
+    if tokens[-1:] in (["CMD"], ["COMMAND"]) or "_COMMAND_" in normalized:
+        return AccessType.WO
+    return AccessType.RW
+
+
 def parse_typedef_structs(content: str) -> list[TypedefStruct]:
     """Extract typedef struct definitions (peripheral register layouts)."""
     structs: list[TypedefStruct] = []
@@ -620,7 +649,7 @@ def _direct_macro_register_candidates(
             name=macro.name,
             offset=offset,
             description=macro.description,
-            access=_infer_access_from_description(macro.description, AccessType.RW),
+            access=_infer_access_from_macro(macro.name, macro.description),
             order=macro.order,
         ))
     return candidates
@@ -659,7 +688,7 @@ def _indexed_macro_register_candidates(
                 name=f"{macro.name}_{index}",
                 offset=offset,
                 description=macro.description,
-                access=_infer_access_from_description(macro.description, AccessType.RW),
+                access=_infer_access_from_macro(macro.name, macro.description),
                 order=macro.order * _MACRO_INDEX_EXPANSION_COUNT + index,
             ))
     return candidates

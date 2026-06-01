@@ -46,9 +46,19 @@ class GenericPlatform(Platform):
                 category="docs",
                 description=f"Datasheet or reference manual for {mcu} {peripheral}",
                 queries=(
-                    f'"{mcu}" "{peripheral}" datasheet register map pdf',
+                    f'"{mcu}" "{peripheral}" datasheet register map .pdf',
                 ),
                 file_extensions=(".pdf",),
+            ),
+            AssetDescriptor(
+                key="device_tree",
+                category="docs",
+                description=f"Device-tree source for {mcu} {peripheral}",
+                queries=(
+                    f'"{mcu}" "{peripheral}" device tree .dts .dtsi',
+                ),
+                file_extensions=(".dts", ".dtsi"),
+                max_matches=5,
             ),
             AssetDescriptor(
                 key="driver_source",

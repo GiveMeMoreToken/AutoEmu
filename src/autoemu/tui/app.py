@@ -20,6 +20,47 @@ BANNER = (
 )
 
 
+def _final_phase_status_actions(result) -> list[tuple[str, int]]:
+    """Map a completed pipeline result to phase-list status method calls."""
+    actions: list[tuple[str, int]] = []
+    if getattr(result, "fetch_result", None):
+        actions.extend([("set_phase_done", 1), ("set_phase_done", 2)])
+    if getattr(result, "build_result", None):
+        actions.append(("set_phase_done", 3))
+
+    validation = getattr(result, "validation_result", None) or {}
+    if validation:
+        val_warnings = validation.get("warnings", [])
+        val_errors = validation.get("errors", [])
+        val_skipped_qemu = any("QEMU source tree not found" in w for w in val_warnings)
+        if validation.get("success") and not val_skipped_qemu and not val_warnings:
+            actions.append(("set_phase_done", 4))
+        elif validation.get("success") and not val_errors:
+            actions.append(("set_phase_warn", 4))
+        else:
+            actions.append(("set_phase_error", 4))
+
+    probe = getattr(result, "probe_result", None) or {}
+    if probe:
+        if probe.get("success"):
+            actions.append(("set_phase_done", 5))
+        else:
+            actions.append(("set_phase_warn", 5))
+    return actions
+
+
+def _schedule_progress_update(app, phases, log, progress) -> None:
+    """Schedule a pipeline progress update on Textual's UI thread."""
+    if progress.error:
+        app.call_from_thread(log.log_error, f"Pipeline error: {progress.error}")
+        return
+    if progress.finished:
+        return
+    app.call_from_thread(phases.set_phase_running, progress.phase)
+    if progress.detail:
+        app.call_from_thread(log.log_kind, progress.detail, progress.kind)
+
+
 class SettingsScreen(Container):
     """Inline settings panel for backend configuration."""
 
@@ -370,21 +411,15 @@ class AutoEmuApp(App):
         phases = self.query_one("#phase-list", PipelinePhaseList)
 
         self.app.call_from_thread(phases.reset_phases)
+        self.app.call_from_thread(log.clear)
         self.app.call_from_thread(log.clear_log_buffer)
 
-        log.log_info(f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
+        self.app.call_from_thread(log.log_info, f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
         if cve_id:
-            log.log_info(f"CVE target: [bold]{cve_id}[/]")
+            self.app.call_from_thread(log.log_info, f"CVE target: [bold]{cve_id}[/]")
 
         def on_progress(p: PipelineProgress) -> None:
-            if p.error:
-                log.log_error(f"Pipeline error: {p.error}")
-                return
-            if p.finished:
-                return
-            self.app.call_from_thread(phases.set_phase_running, p.phase)
-            if p.detail:
-                log.log_kind(p.detail, p.kind)
+            _schedule_progress_update(self.app, phases, log, p)
 
         try:
             runtime = AutoEmuAgentRuntime()
@@ -395,40 +430,31 @@ class AutoEmuApp(App):
                 on_progress=on_progress,
             )
 
+            for method_name, phase in _final_phase_status_actions(result):
+                self.app.call_from_thread(getattr(phases, method_name), phase)
+
             if result.success:
-                for i in range(1, 4):
-                    self.app.call_from_thread(phases.set_phase_done, i)
-                val_ok = result.validation_result.get("success", True)
-                val_errors = result.validation_result.get("errors", [])
-                val_warnings = result.validation_result.get("warnings", [])
-                val_skipped_qemu = any("QEMU source tree not found" in w for w in val_warnings)
-                if val_ok and not val_skipped_qemu and not val_warnings:
-                    self.app.call_from_thread(phases.set_phase_done, 4)
-                elif val_errors:
-                    self.app.call_from_thread(phases.set_phase_error, 4)
-                else:
-                    self.app.call_from_thread(phases.set_phase_warn, 4)
-                log.log_success("Pipeline completed!")
+                self.app.call_from_thread(log.log_success, "Pipeline completed!")
             else:
-                log.log_error(f"Pipeline failed: {result.error}")
+                self.app.call_from_thread(log.log_error, f"Pipeline failed: {result.error}")
 
             if result.platform:
-                log.log_info(f"Platform: [bold]{result.platform}[/]")
+                self.app.call_from_thread(log.log_info, f"Platform: [bold]{result.platform}[/]")
 
             if result.generated_files:
-                log.log_info(f"Generated [bold]{len(result.generated_files)}[/] file(s):")
+                self.app.call_from_thread(log.log_info, f"Generated [bold]{len(result.generated_files)}[/] file(s):")
                 for f in result.generated_files[:20]:
-                    log.write(f"  [cyan]{f}[/]")
+                    self.app.call_from_thread(log.write, f"  [cyan]{f}[/]")
                 if len(result.generated_files) > 20:
-                    log.write(f"  ... and {len(result.generated_files) - 20} more")
+                    self.app.call_from_thread(log.write, f"  ... and {len(result.generated_files) - 20} more")
 
             if result.test_commands:
-                log.log_info("Test and validation commands:")
+                self.app.call_from_thread(log.log_info, "Test and validation commands:")
                 for cmd in result.test_commands:
                     if cmd.startswith("# "):
-                        log.write(f"  [dim]{cmd}[/]")
+                        self.app.call_from_thread(log.write, f"  [dim]{cmd}[/]")
                     else:
-                        log.write(f"  [bold green]{cmd}[/]")
+                        self.app.call_from_thread(log.write, f"  [bold green]{cmd}[/]")
 
             val = result.validation_result
             if val:
@@ -437,31 +463,35 @@ class AutoEmuApp(App):
                 warnings = val.get("warnings", [])
                 skipped_qemu = any("QEMU source tree not found" in w for w in warnings)
                 if val.get("success") and not warnings:
-                    log.log_success(f"Validation: {checked} file(s) checked, no errors")
+                    self.app.call_from_thread(log.log_success, f"Validation: {checked} file(s) checked, no errors")
                 elif val.get("success") and skipped_qemu:
-                    log.log_kind("Validation: compilation skipped (no QEMU source tree)", "warn")
+                    self.app.call_from_thread(log.log_kind, "Validation: compilation skipped (no QEMU source tree)", "warn")
                 elif val.get("success") and warnings:
-                    log.log_kind(
+                    self.app.call_from_thread(
+                        log.log_kind,
                         f"Validation: {checked} file(s) checked, {len(warnings)} warning(s)",
                         "warn",
                     )
                 elif errors:
-                    log.log_error(f"Validation: {len(errors)} error(s) in {checked} file(s)")
+                    self.app.call_from_thread(log.log_error, f"Validation: {len(errors)} error(s) in {checked} file(s)")
                     for err in errors[:10]:
-                        log.write(f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]")
+                        self.app.call_from_thread(
+                            log.write,
+                            f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]",
+                        )
                 else:
-                    log.log_error(f"Validation: {checked} file(s) checked, blocking warning(s)")
+                    self.app.call_from_thread(log.log_error, f"Validation: {checked} file(s) checked, blocking warning(s)")
 
         except Exception as exc:
             import traceback
-            log.log_error(f"Unexpected error: {exc}")
-            log.write(f"[red]{traceback.format_exc()}[/]")
+            self.app.call_from_thread(log.log_error, f"Unexpected error: {exc}")
+            self.app.call_from_thread(log.write, f"[red]{traceback.format_exc()}[/]")
 
         finally:
             # Auto-save log after every run
             try:
                 path = log.save_to_file()
-                log.write(f"[dim]Log saved → {path}[/]")
+                self.app.call_from_thread(log.write, f"[dim]Log saved -> {path}[/]")
             except Exception:
                 pass
 

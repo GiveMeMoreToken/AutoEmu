@@ -289,6 +289,15 @@ def resolve_fetched_input_bundle(
                         str(p) for p in sorted(candidate_dir.glob(ext)) if p.is_file()
                     )
 
+    layout_docs, layout_svds, layout_headers, layout_drivers = _scan_local_layout_paths(
+        output_root,
+        target_mcu,
+    )
+    _extend_unique(docs, layout_docs)
+    _extend_unique(svds, layout_svds)
+    _extend_unique(headers, layout_headers)
+    _extend_unique(drivers, layout_drivers)
+
     return FetchedInputBundle(
         target_mcu=target_mcu,
         target_peripheral=target_peripheral,
@@ -298,6 +307,99 @@ def resolve_fetched_input_bundle(
         driver_paths=tuple(drivers),
         documentation_paths=tuple(docs),
     )
+
+
+def _extend_unique(items: list[str], extra_items: list[str]) -> None:
+    seen = set(items)
+    for item in extra_items:
+        if item not in seen:
+            items.append(item)
+            seen.add(item)
+
+
+def _scan_local_layout_paths(output_root: Path, target_mcu: str) -> tuple[list[str], list[str], list[str], list[str]]:
+    docs: list[str] = []
+    svds: list[str] = []
+    headers: list[str] = []
+    drivers: list[str] = []
+
+    target_root = output_root / _target_slug(target_mcu)
+    if target_root.is_dir():
+        docs.extend(_collect_doc_paths(target_root / "docs"))
+        svds.extend(str(path) for path in sorted((target_root / "svd").glob("*.svd")) if path.is_file())
+        headers.extend(str(path) for path in sorted((target_root / "headers").glob("*.h")) if path.is_file())
+        drivers.extend(
+            str(path)
+            for path in sorted((target_root / "drivers").rglob("*.c"))
+            if path.is_file()
+        )
+
+    for scan_dir, ext, target_list in [
+        ("svd", "*.svd", svds),
+        ("svd", "*.xml", svds),
+        ("header", "*.h", headers),
+        ("headers", "*.h", headers),
+        ("driver", "*.c", drivers),
+        ("drivers", "*.c", drivers),
+        ("docs", "*.txt", docs),
+        ("docs", "*.pdf", docs),
+        ("docs", "*.md", docs),
+        ("docs", "*.html", docs),
+        ("docs", "*.htm", docs),
+        ("docs", "*.dts", docs),
+        ("docs", "*.dtsi", docs),
+    ]:
+        candidate_dir = output_root / scan_dir
+        if candidate_dir.is_dir():
+            target_list.extend(
+                str(path) for path in sorted(candidate_dir.glob(ext)) if path.is_file()
+            )
+
+    return docs, svds, headers, drivers
+
+
+def collect_cached_input_artifacts(
+    *,
+    target_mcu: str,
+    target_peripheral: str,
+    data_dir: str | Path,
+) -> list[dict[str, str]]:
+    """Return already available local inputs in fetch-result artifact shape."""
+    bundle = resolve_fetched_input_bundle(
+        target_mcu=target_mcu,
+        target_peripheral=target_peripheral,
+        data_dir=data_dir,
+    )
+    artifacts: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(local_path: str, category: str) -> None:
+        if not local_path:
+            return
+        path = Path(local_path)
+        if not path.exists() or not path.is_file():
+            return
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        artifacts.append({
+            "title": path.name,
+            "url": "",
+            "category": category,
+            "local_path": key,
+            "status": "cached",
+            "size_bytes": str(path.stat().st_size),
+        })
+
+    _add(bundle.svd_path, "svd")
+    _add(bundle.header_path, "header")
+    for driver_path in bundle.driver_paths:
+        _add(driver_path, "driver")
+    for doc_path in bundle.documentation_paths:
+        _add(doc_path, "docs")
+
+    return artifacts
 
 
 def _collect_doc_paths(directory: Path) -> list[str]:
@@ -464,66 +566,11 @@ class GenericDataFetcher:
         self.search_timeout = search_timeout
         self.max_results_per_query = max_results_per_query
 
-    # Known raw source URLs for well-known Linux kernel drivers, keyed by
-    # (vendor_substring, peripheral_keyword) → list of (url, category).
-    # These supplement web search when the platform is recognised.
-    _KNOWN_DRIVER_URLS: list[tuple[str, str, str, str]] = [
-        # (vendor_match, peripheral_match, url, category)
-        # HiSilicon / Kirin — Mali G71 (Bifrost) via panfrost
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.c",
-         "driver"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_device.h",
-         "header"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_regs.h",
-         "header"),
-        ("hisilicon", "gpu",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/panfrost/panfrost_job.c",
-         "driver"),
-        # HiSilicon / Kirin — ADE display engine (kirin_drm_dss was never in mainline)
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_ade.c",
-         "driver"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_ade_reg.h",
-         "header"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.c",
-         "driver"),
-        ("hisilicon", "display",
-         "https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/hisilicon/kirin/kirin_drm_drv.h",
-         "header"),
-        # STM32 — common peripheral headers from cmsis-svd / stm32-rs
-        ("stm32", "uart",
-         "https://raw.githubusercontent.com/stm32-rs/stm32-rs/master/stm32f4/src/stm32f407/usart1.rs",
-         "docs"),
-    ]
-
-    def _known_candidates(self, mcu: str, peripheral: str) -> list[SearchCandidate]:
-        """Return pre-scored candidates from the known-driver URL table."""
-        from autoemu.platforms import analyze_target
-        info = analyze_target(mcu)
-        vendor = info.vendor.lower()
-        periph_lower = peripheral.lower()
-        candidates = []
-        for vendor_key, periph_key, url, category in self._KNOWN_DRIVER_URLS:
-            if vendor_key in vendor and periph_key in periph_lower:
-                candidates.append(SearchCandidate(
-                    title=f"[known] {url.split('/')[-1]}",
-                    url=url,
-                    category=category,
-                    score=90,
-                    description=f"[{category}] known kernel driver source",
-                ))
-        return candidates
-
     def _build_queries(self, mcu: str, peripheral: str) -> list[tuple[str, str]]:
         """Return (query_string, category) pairs for this target.
 
         Uses board analysis to generate smarter queries with vendor
-        aliases and broader fallbacks.
+        aliases and broader search terms.
         """
         from autoemu.platforms import analyze_target
 
@@ -544,11 +591,11 @@ class GenericDataFetcher:
         queries.append((f"site:raw.githubusercontent.com {mcu} {peripheral} .h", "header"))
 
         # Documentation queries (broad: include vendor terms)
-        queries.append((f"{mcu} {peripheral} datasheet register map", "docs"))
-        queries.append((f"{mcu} {peripheral} device tree dts dtsi", "docs"))
+        queries.append((f"{mcu} {peripheral} datasheet register map .pdf", "docs"))
+        queries.append((f"{mcu} {peripheral} device tree .dts .dtsi", "docs"))
         for term in extra_terms[:2]:
-            queries.append((f"{term} {peripheral} register map datasheet", "docs"))
-            queries.append((f"{term} {peripheral} device tree dts dtsi", "docs"))
+            queries.append((f"{term} {peripheral} register map datasheet .pdf", "docs"))
+            queries.append((f"{term} {peripheral} device tree .dts .dtsi", "docs"))
 
         # Driver queries — target raw source files specifically
         queries.append((f"{mcu} {peripheral} driver source code site:github.com", "driver"))
@@ -590,13 +637,6 @@ class GenericDataFetcher:
         queries = self._build_queries(target_mcu, target_peripheral)
         all_candidates: list[SearchCandidate] = []
         seen_urls: set[str] = set()
-
-        # Seed with known-good driver URLs before any web search
-        for candidate in self._known_candidates(target_mcu, target_peripheral):
-            normalized = candidate.url.split("?")[0].rstrip("/")
-            if normalized not in seen_urls:
-                seen_urls.add(normalized)
-                all_candidates.append(candidate)
 
         pool = ThreadPoolExecutor(max_workers=min(len(queries), 5))
         futures: dict[Future[list[SearchCandidate]], tuple[str, str]] = {

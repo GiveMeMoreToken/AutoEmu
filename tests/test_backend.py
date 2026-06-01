@@ -59,6 +59,66 @@ class TestToolSpec:
         text = result["content"][0]["text"]
         assert "a.txt" in text and "b.txt" in text
 
+    @pytest.mark.asyncio
+    async def test_validate_behavior_accepts_json_file_paths(self, tmp_path):
+        peripheral = {
+            "name": "GPU",
+            "peripheral_type": "generic",
+            "base_address": 0,
+            "register_block": {
+                "name": "GPU",
+                "registers": [{"name": "GPU_ID", "offset": 0}],
+            },
+        }
+        analysis = {
+            "register_accesses": [{"register": "GPU_ID", "access_type": "read"}],
+            "isr_patterns": [],
+            "init_sequences": [],
+        }
+        peripheral_path = tmp_path / "gpu_peripheral.json"
+        analysis_path = tmp_path / "gpu_driver_analysis.json"
+        peripheral_path.write_text(json.dumps(peripheral), encoding="utf-8")
+        analysis_path.write_text(json.dumps(analysis), encoding="utf-8")
+
+        tool = next(t for t in ALL_TOOLS if t.name == "validate_behavior")
+        result = await tool.handler(
+            {
+                "peripheral_json": str(peripheral_path),
+                "driver_analysis_json": str(analysis_path),
+            }
+        )
+
+        assert not result.get("is_error")
+        assert "Behavior validation passed" in result["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_generate_qemu_peripheral_accepts_json_file_path(self, tmp_path):
+        peripheral = {
+            "name": "GPU",
+            "peripheral_type": "generic",
+            "base_address": 0xE82C0000,
+            "mcu_family": "HISI",
+            "register_block": {
+                "name": "GPU",
+                "registers": [{"name": "GPU_ID", "offset": 0}],
+            },
+        }
+        peripheral_path = tmp_path / "gpu_peripheral.json"
+        output_dir = tmp_path / "output"
+        peripheral_path.write_text(json.dumps(peripheral), encoding="utf-8")
+
+        tool = next(t for t in ALL_TOOLS if t.name == "generate_qemu_peripheral")
+        result = await tool.handler(
+            {
+                "peripheral_json": str(peripheral_path),
+                "output_dir": str(output_dir),
+            }
+        )
+
+        assert not result.get("is_error")
+        assert (output_dir / "hisi_gpu.c").exists()
+        assert (output_dir / "hisi_gpu.h").exists()
+
 
 class TestPrompts:
     def test_prompts_target_latest_qemu_not_v924(self):

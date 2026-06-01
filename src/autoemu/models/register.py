@@ -67,9 +67,17 @@ class Register(BaseModel):
         """Apply a write operation respecting field access types."""
         result = current
         if not self.fields:
-            if self.access == AccessType.RO:
-                return current
-            return write_value
+            match self.access:
+                case AccessType.RO | AccessType.RSVD:
+                    return current
+                case AccessType.W1C:
+                    return current & ~write_value
+                case AccessType.W1S:
+                    return current | write_value
+                case AccessType.W0C:
+                    return current & write_value
+                case _:
+                    return write_value
 
         for field in self.fields:
             written_bits = field.extract(write_value)

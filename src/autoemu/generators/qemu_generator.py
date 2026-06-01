@@ -30,6 +30,66 @@ def _device_prefix(peripheral: Peripheral) -> str:
     return normalize_name(family)
 
 
+def _interrupt_register_groups(peripheral: Peripheral) -> dict[str, dict[str, str]]:
+    groups: dict[str, dict[str, str]] = {}
+    for reg in peripheral.register_block.registers:
+        split = _split_interrupt_register_name(reg.name)
+        if not split:
+            continue
+        prefix, kind = split
+        groups.setdefault(prefix, {})[kind] = reg.name
+    return groups
+
+
+def _split_interrupt_register_name(name: str) -> tuple[str, str] | None:
+    for suffix, kind in (
+        ("_RAWSTAT", "RAWSTAT"),
+        ("_CLEAR", "CLEAR"),
+        ("_MASK", "MASK"),
+        ("_STAT", "STAT"),
+        ("_STATUS", "STAT"),
+    ):
+        if not name.endswith(suffix):
+            continue
+        prefix = name[: -len(suffix)]
+        if prefix.endswith(("_INT", "_IRQ", "_INTR")):
+            return prefix, kind
+    return None
+
+
+def _derived_interrupt_status_expr(
+    reg_name: str,
+    interrupt_groups: dict[str, dict[str, str]],
+) -> str:
+    split = _split_interrupt_register_name(reg_name)
+    if not split:
+        return ""
+    prefix, kind = split
+    if kind != "STAT":
+        return ""
+    group = interrupt_groups.get(prefix, {})
+    rawstat = group.get("RAWSTAT")
+    if not rawstat:
+        return ""
+    mask = group.get("MASK")
+    if mask:
+        return f"s->{rawstat.lower()} & ~s->{mask.lower()}"
+    return f"s->{rawstat.lower()}"
+
+
+def _clear_interrupt_rawstat_name(
+    reg_name: str,
+    interrupt_groups: dict[str, dict[str, str]],
+) -> str:
+    split = _split_interrupt_register_name(reg_name)
+    if not split:
+        return ""
+    prefix, kind = split
+    if kind != "CLEAR":
+        return ""
+    return interrupt_groups.get(prefix, {}).get("RAWSTAT", "")
+
+
 def _generate_header(peripheral: Peripheral) -> str:
     """Generate the QEMU peripheral header file."""
     name = peripheral.name
@@ -113,18 +173,22 @@ def _generate_reg_read(peripheral: Peripheral, pfx: str) -> str:
     """Generate the register read function body."""
     upper = _upper(peripheral.name)
     snake = _snake(peripheral.name)
+    interrupt_groups = _interrupt_register_groups(peripheral)
     lines = []
 
     lines.append("    switch (offset) {")
     for reg in peripheral.register_block.registers:
         lines.append(f"    case {upper}_{reg.name}_OFFSET:")
+        derived_status = _derived_interrupt_status_expr(reg.name, interrupt_groups)
 
         has_special_read = any(
             f.access in (AccessType.RC_W1, AccessType.RC_W0, AccessType.WO, AccessType.RS)
             for f in reg.fields
         )
 
-        if has_special_read:
+        if derived_status:
+            lines.append(f"        return {derived_status};")
+        elif has_special_read:
             lines.append("    {")
             lines.append(f"        uint32_t val = s->{reg.name.lower()};")
             for f in reg.fields:
@@ -154,6 +218,7 @@ def _generate_reg_write(peripheral: Peripheral, pfx: str) -> str:
     """Generate the register write function body."""
     upper = _upper(peripheral.name)
     snake = _snake(peripheral.name)
+    interrupt_groups = _interrupt_register_groups(peripheral)
     lines = []
 
     lines.append("    switch (offset) {")
@@ -165,6 +230,18 @@ def _generate_reg_write(peripheral: Peripheral, pfx: str) -> str:
             continue
 
         lines.append(f"    case {upper}_{reg.name}_OFFSET:")
+        clear_rawstat = _clear_interrupt_rawstat_name(reg.name, interrupt_groups)
+        if clear_rawstat:
+            lines.append(f"        s->{clear_rawstat.lower()} &= ~value;")
+            lines.append(f"        {pfx}_{snake}_update_irq(s);")
+            lines.append("        break;")
+            continue
+
+        if reg.access == AccessType.W1C and not reg.fields:
+            lines.append(f"        s->{reg.name.lower()} &= ~value;")
+            lines.append(f"        {pfx}_{snake}_update_irq(s);")
+            lines.append("        break;")
+            continue
 
         has_special_write = any(
             f.access in (AccessType.W1C, AccessType.W1S, AccessType.W0C, AccessType.RO, AccessType.RSVD)
@@ -246,6 +323,7 @@ def _generate_source(peripheral: Peripheral) -> str:
         "",
         "#include \"qemu/osdep.h\"",
         f"#include \"{pfx}_{snake}.h\"",
+        "#include \"hw/irq.h\"",
         "#include \"hw/qdev-properties.h\"",
         "#include \"qemu/log.h\"",
         "#include \"migration/vmstate.h\"",

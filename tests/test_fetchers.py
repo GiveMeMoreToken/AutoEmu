@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import time
 
 from autoemu.agent.prompts import build_system_prompt
+from autoemu.agent.tools import _fetch_data
 from autoemu.agent.runtime import _cleanup_stale_files
 from autoemu.fetchers.generic import (
     SearchResult,
@@ -35,7 +37,10 @@ class FakeSearcher(DuckDuckGoSearcher):
 
 def test_build_system_prompt_includes_fetch_source_policy():
     prompt = build_system_prompt(mode="fetch")
-    assert "trustworthy STM32 input data" in prompt
+    assert "trustworthy target input data" in prompt
+    assert ".c/.h" in prompt
+    assert ".pdf" in prompt
+    assert ".dts/.dtsi" in prompt
     assert "Never invent URLs" in prompt
 
 
@@ -69,7 +74,7 @@ def test_generic_fetcher_discover_scores_candidates():
     assert scores == sorted(scores, reverse=True)
 
 
-def test_generic_fetcher_discover_keeps_completed_candidates_on_timeout():
+def test_generic_fetcher_discover_returns_only_search_results_on_timeout():
     class SlowSearcher(FakeSearcher):
         def search(self, query: str, *, max_results: int = 8):
             time.sleep(0.05)
@@ -78,8 +83,27 @@ def test_generic_fetcher_discover_keeps_completed_candidates_on_timeout():
     fetcher = GenericDataFetcher(searcher=SlowSearcher([]), search_timeout=0.01)
     candidates = fetcher.discover_candidates("Hikey960", "GPU")
 
-    assert any(candidate.url.endswith("panfrost_device.c") for candidate in candidates)
-    assert any(candidate.url.endswith("panfrost_regs.h") for candidate in candidates)
+    assert candidates == []
+
+
+def test_generic_fetcher_discover_does_not_seed_known_target_candidates():
+    fetcher = GenericDataFetcher(searcher=FakeSearcher([]))
+
+    candidates = fetcher.discover_candidates("Hikey960", "GPU")
+
+    assert candidates == []
+
+
+def test_fetch_queries_cover_source_docs_and_device_tree_file_types():
+    fetcher = GenericDataFetcher(searcher=FakeSearcher([]))
+
+    queries = [query.lower() for query, _category in fetcher._build_queries("Hikey960", "GPU")]
+
+    assert any(".c" in query or "filetype:c" in query for query in queries)
+    assert any(".h" in query for query in queries)
+    assert any(".pdf" in query or "filetype:pdf" in query for query in queries)
+    assert any(".dts" in query or " dts" in query for query in queries)
+    assert any(".dtsi" in query or " dtsi" in query for query in queries)
 
 
 def test_resolve_fetched_input_bundle_from_manifest(tmp_path):
@@ -111,6 +135,35 @@ def test_resolve_fetched_input_bundle_from_manifest(tmp_path):
     assert bundle.svd_path == str(svd)
     assert bundle.header_path == str(header)
     assert len(bundle.driver_paths) == 1
+
+
+def test_resolve_fetched_input_bundle_merges_local_docs_when_manifest_lacks_them(tmp_path):
+    data_dir = tmp_path / "data"
+    (data_dir / "manifests").mkdir(parents=True)
+    (data_dir / "docs").mkdir()
+
+    header = data_dir / "device.h"
+    dtsi = data_dir / "docs" / "hi3660-gpu.dtsi"
+    header.write_text("#define GPU_ID 0\n", encoding="utf-8")
+    dtsi.write_text('/ { gpu: mali@1000 { reg = <0x1000 0x100>; }; };\n', encoding="utf-8")
+
+    manifest = {
+        "target_mcu": "Hikey960",
+        "target_peripheral": "GPU",
+        "artifacts": [
+            {"category": "header", "status": "downloaded", "local_path": str(header)},
+        ],
+    }
+    manifest_path = data_dir / "manifests" / "hikey960_gpu.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    bundle = resolve_fetched_input_bundle(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        data_dir=data_dir,
+    )
+
+    assert str(dtsi) in bundle.documentation_paths
 
 
 def test_resolve_fetched_input_bundle_flat_layout(tmp_path):
@@ -210,6 +263,42 @@ def test_fetch_selected_decodes_gitiles_text_device_tree(monkeypatch, tmp_path):
     assert not result.errors
     saved = tmp_path / "docs" / "hi3660-gpu.dtsi"
     assert saved.read_bytes() == dtsi_text
+
+
+def test_fetch_data_reports_cached_docs_when_refresh_false(monkeypatch, tmp_path):
+    data_dir = tmp_path / "hikey960"
+    (data_dir / "docs").mkdir(parents=True)
+    (data_dir / "driver").mkdir()
+    (data_dir / "header").mkdir()
+    (data_dir / "docs" / "hi3660-gpu.dtsi").write_text(
+        '/ { gpu: mali@E82C0000 { reg = <0x0 0xE82C0000 0x0 0x4000>; }; };\n',
+        encoding="utf-8",
+    )
+    (data_dir / "driver" / "panfrost_device.c").write_text("void init(void) {}\n", encoding="utf-8")
+    (data_dir / "header" / "panfrost_regs.h").write_text("#define GPU_ID 0\n", encoding="utf-8")
+
+    class EmptyFetcher:
+        def discover_candidates(self, target_mcu, target_peripheral):
+            return []
+
+        def select_candidates(self, candidates, *, limit=10):
+            return []
+
+        def fetch_selected(self, selected, output_dir, *, target_mcu, target_peripheral):
+            return type("Result", (), {"downloaded": [], "errors": []})()
+
+    monkeypatch.setattr("autoemu.agent.tools.GenericDataFetcher", EmptyFetcher)
+
+    result = asyncio.run(_fetch_data({
+        "target_mcu": "Hikey960",
+        "target_peripheral": "GPU",
+        "output_dir": str(data_dir),
+        "refresh": False,
+    }))
+
+    text = result["content"][0]["text"]
+    assert "Reused: " in text
+    assert "hi3660-gpu.dtsi (docs)" in text
 
 
 def test_cleanup_removes_stale_html_device_tree_docs(tmp_path):

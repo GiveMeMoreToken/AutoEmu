@@ -126,6 +126,7 @@ class TestQEMUGenerator:
             # DeviceClass access in latest QEMU requires hw/core/qdev-properties.h
             assert 'hw/qdev-properties.h' in content
             assert 'hw/core/qdev-properties.h' not in content
+            assert 'hw/irq.h' in content
 
             # VMSTATE uses bare field names (not s->field)
             assert "VMSTATE_UINT32(cr," in content
@@ -177,4 +178,29 @@ class TestQEMUGenerator:
             assert "(s->sr & (1U << 1))" in content
             assert "s-> &" not in content
 
+    def test_source_derives_interrupt_status_and_clears_raw_status(self):
+        periph = Peripheral(
+            name="GPU",
+            peripheral_type=PeripheralType.GENERIC,
+            base_address=0xE82C0000,
+            address_size=0x4000,
+            mcu_family="HISI",
+            register_block=RegisterBlock(
+                name="GPU",
+                registers=[
+                    Register(name="MMU_INT_RAWSTAT", offset=0x2000, access=AccessType.RO),
+                    Register(name="MMU_INT_CLEAR", offset=0x2004, access=AccessType.W1C),
+                    Register(name="MMU_INT_MASK", offset=0x2008),
+                    Register(name="MMU_INT_STAT", offset=0x200C, access=AccessType.RO),
+                ],
+            ),
+        )
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = generate_peripheral_code(periph, tmpdir)
+            source = [f for f in files if Path(f).name == "hisi_gpu.c"][0]
+            content = Path(source).read_text()
+
+        assert "return s->mmu_int_rawstat & ~s->mmu_int_mask;" in content
+        assert "s->mmu_int_rawstat &= ~value;" in content
+        assert "s->mmu_int_clear = value;" not in content

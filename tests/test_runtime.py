@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from autoemu.agent.runtime import (
     AgentRuntimeConfig,
     AutoEmuAgentRuntime,
     PipelineProgress,
+    _clear_output_dir,
 )
 
 
@@ -399,6 +401,45 @@ def test_do_fetch_records_agent_fetch_error(monkeypatch, tmp_path):
     assert result["agent_error"] == "codex-app-server-sdk is not installed"
 
 
+def test_do_fetch_reports_cached_inputs_when_no_new_downloads(monkeypatch, tmp_path):
+    """Stage 2 should surface cached docs and DTS files when refresh is off."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "driver").mkdir()
+    (tmp_path / "docs" / "hi3660-gpu.dtsi").write_text(
+        '/ { gpu: mali@E82C0000 { reg = <0x0 0xE82C0000 0x0 0x4000>; }; };\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "driver" / "panfrost_device.c").write_text("void init(void) {}\n", encoding="utf-8")
+
+    class FakeFetcher:
+        def discover_candidates(self, target_mcu, target_peripheral):
+            return []
+
+        def fetch_selected(self, selected, output_dir, *, target_mcu, target_peripheral):
+            return SimpleNamespace(downloaded=[], errors=[])
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            pass
+
+        async def fetch_input_data(self, task, on_event=None):
+            return SimpleNamespace(error="agent disabled", agent_messages=[])
+
+    monkeypatch.setattr("autoemu.agent.runtime.GenericDataFetcher", FakeFetcher)
+    monkeypatch.setattr("autoemu.agent.runtime.AutoEmuOrchestrator", FakeOrchestrator)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._do_fetch(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        platform_name="generic",
+        output_dir=str(tmp_path),
+    )
+
+    assert result["success"] is True
+    assert any(item["local_path"].endswith("hi3660-gpu.dtsi") for item in result["reused"])
+
+
 def test_do_build_records_agent_build_error_without_discarding_local_output(monkeypatch, tmp_path):
     """Agent build failures should be explicit while preserving local artifacts."""
 
@@ -436,6 +477,72 @@ def test_do_build_records_agent_build_error_without_discarding_local_output(monk
 
     assert result["generated_files"] == ["output/hikey960_gpu.c"]
     assert result["agent_error"] == "codex-app-server-sdk is not installed"
+
+
+def test_do_build_preserves_stage5_probe_assets(monkeypatch, tmp_path):
+    """Build cleanup must not delete DTB/rootfs artifacts needed by phase 5."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "probe.dtb").write_text("dtb\n", encoding="utf-8")
+    (output_dir / "rootfs-aarch64-stage5.ext4").write_text("rootfs\n", encoding="utf-8")
+    (output_dir / "stale.c").write_text("old\n", encoding="utf-8")
+
+    observed: dict[str, bool] = {}
+
+    class FakeOrchestrator:
+        def __init__(self, **kwargs):
+            pass
+
+        async def model_peripheral(self, task, on_event=None, phase_delay_seconds=0):
+            return SimpleNamespace(error="agent disabled", agent_messages=[])
+
+    def fake_run_target_model_pipeline(**kwargs):
+        out = Path(kwargs["output_dir"])
+        observed["probe_exists_during_build"] = (out / "probe.dtb").exists()
+        observed["rootfs_exists_during_build"] = (out / "rootfs-aarch64-stage5.ext4").exists()
+        (out / "fresh.c").write_text("new\n", encoding="utf-8")
+        return {"success": True, "generated_files": [str(out / "fresh.c")]}
+
+    def fake_resolve_fetched_input_bundle(**kwargs):
+        return SimpleNamespace(svd_path="", header_path="", driver_paths=())
+
+    monkeypatch.setattr("autoemu.agent.runtime.AutoEmuOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr("autoemu.agent.runtime.run_target_model_pipeline", fake_run_target_model_pipeline)
+    monkeypatch.setattr("autoemu.agent.runtime.resolve_fetched_input_bundle", fake_resolve_fetched_input_bundle)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk", agent_phase_delay=0))
+    runtime._do_build(
+        target_mcu="Hikey960",
+        target_peripheral="GPU",
+        platform_name="generic",
+        data_dir=str(tmp_path / "data"),
+        output_dir=str(output_dir),
+    )
+
+    assert observed == {
+        "probe_exists_during_build": True,
+        "rootfs_exists_during_build": True,
+    }
+    assert (output_dir / "probe.dtb").exists()
+    assert (output_dir / "rootfs-aarch64-stage5.ext4").exists()
+    assert not (output_dir / "stale.c").exists()
+
+
+def test_clear_output_dir_preserves_stage5_probe_assets(tmp_path):
+    """Top-level pipeline cleanup should preserve phase-5 probe assets."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "probe.dtb").write_text("dtb\n", encoding="utf-8")
+    (output_dir / "rootfs-aarch64-stage5.ext4").write_text("rootfs\n", encoding="utf-8")
+    (output_dir / "stale.json").write_text("{}\n", encoding="utf-8")
+    events: list[tuple[int, str, str]] = []
+
+    _clear_output_dir(str(output_dir), lambda phase, msg, kind: events.append((phase, msg, kind)))
+
+    assert (output_dir / "probe.dtb").exists()
+    assert (output_dir / "rootfs-aarch64-stage5.ext4").exists()
+    assert not (output_dir / "stale.json").exists()
+    assert events
 
 
 def test_do_validate_uses_configured_qemu_source(monkeypatch, tmp_path):

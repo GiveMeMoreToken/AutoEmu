@@ -320,12 +320,14 @@ def apply_machine_patch(
     if all(line.startswith("#") or not line.strip() for line in patch_text.splitlines()):
         return True
 
+    strip_level = _patch_strip_level(patch_text)
+
     # Prefer the system patch command
     patch_cmd = shutil.which("patch")
     if patch_cmd:
         try:
             result = subprocess.run(
-                [patch_cmd, "-p1", "-i", str(patch_file), "-d", str(qemu_src_path)],
+                [patch_cmd, f"-p{strip_level}", "-i", str(patch_file), "-d", str(qemu_src_path)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -368,6 +370,9 @@ def apply_machine_patch(
             if current_file and orig_lines:
                 current_file.write_text("".join(new_lines), encoding="utf-8")
             path_str = line[4:].strip().split("\t")[0]
+            if strip_level:
+                parts = Path(path_str).parts[strip_level:]
+                path_str = str(Path(*parts)) if parts else path_str
             current_file = qemu_src_path / path_str
             orig_lines = []
             new_lines = []
@@ -409,3 +414,14 @@ def apply_machine_patch(
         current_file.write_text("".join(new_lines), encoding="utf-8")
         return True
     return False
+
+
+def _patch_strip_level(patch_text: str) -> int:
+    """Return the path strip level needed for a unified diff."""
+    paths: list[str] = []
+    for line in patch_text.splitlines():
+        if line.startswith("--- ") or line.startswith("+++ "):
+            path = line[4:].strip().split("\t")[0]
+            if path != "/dev/null":
+                paths.append(path)
+    return 1 if paths and all(path.startswith(("a/", "b/")) for path in paths) else 0

@@ -84,21 +84,6 @@ The unified runtime executes 5 phases:
 4. Validating generated code (compile check against QEMU headers)
 5. Testing driver probing (targeted ninja rebuild in QEMU build env — soft-fail)
 
-## 2026-05-20 Handoff Notes
-
-- Logs `autoemu_20260520_203850.log` and `autoemu_20260520_223725.log` showed
-  Hikey960/GPU runs with `base_address=0` or empty registers after agent
-  failures.
-- The useful generic fixes identified from those logs were:
-  - macro-only register extraction for Linux-style register maps
-  - related direct-prefix and indexed-family register inclusion
-  - MMIO base/size inference from DTS/DTSI `reg` entries
-  - fetch selection that preserves lower-scored device-tree documentation
-  - timeout-tolerant fetch discovery that returns completed results
-  - explicit fetch prompts for DTS/DTSI/device-tree sources
-- Keep these fixes generic. Do not add special cases for Hikey960, Mali,
-  Bifrost, Valhall, Panfrost, or any other specific hardware.
-
 ## Verification Expectations
 
 - Run `pytest` before claiming code changes are complete.

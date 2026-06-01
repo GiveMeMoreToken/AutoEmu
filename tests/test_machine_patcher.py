@@ -158,3 +158,28 @@ def test_apply_machine_patch_uses_external_patch_command(tmp_path, monkeypatch):
     result = apply_machine_patch(qemu_src, patch)
     assert result is True
     assert ran_external is True
+
+
+def test_apply_machine_patch_handles_qemu_relative_paths(tmp_path):
+    """Generated QEMU patches use tree-relative paths without a/ b/ prefixes."""
+    qemu_src = tmp_path / "qemu"
+    target_dir = qemu_src / "hw" / "arm"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "virt.c"
+    target.write_text("create_platform_bus(vms);\n", encoding="utf-8")
+
+    patch = tmp_path / "virt_gpu.patch"
+    patch.write_text(
+        "--- hw/arm/virt.c\n"
+        "+++ hw/arm/virt.c\n"
+        "@@ -1 +1,2 @@\n"
+        " create_platform_bus(vms);\n"
+        "+create_gpu(vms);\n",
+        encoding="utf-8",
+    )
+
+    assert apply_machine_patch(qemu_src, patch) is True
+    assert target.read_text(encoding="utf-8") == (
+        "create_platform_bus(vms);\n"
+        "create_gpu(vms);\n"
+    )

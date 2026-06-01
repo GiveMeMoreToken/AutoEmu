@@ -15,13 +15,38 @@ from autoemu.agent.runtime import AgentRuntimeConfig, AutoEmuAgentRuntime
 from autoemu.cve_validator import run_cve_check
 
 
+def _fake_cve_details(cve_id: str) -> dict:
+    return {
+        "found": True,
+        "cve_id": cve_id,
+        "description": "Qualcomm Adreno GPU driver vulnerability",
+        "references": ["https://example.com/adreno-advisory"],
+        "affected_products": ["cpe:2.3:h:qualcomm:adreno:-:*:*:*:*:*:*:*"],
+        "published": "2022-10-19T11:15:10.387",
+        "error": "",
+    }
+
+
+def _fake_poc_findings(cve_id: str, *args, **kwargs) -> list[dict[str, str]]:
+    return [
+        {
+            "title": f"{cve_id} advisory",
+            "url": f"https://example.com/{cve_id.lower()}",
+            "category": "advisory",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # CVE validation
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cve_id", ["CVE-2016-2067", "CVE-2022-25664"])
-def test_run_cve_check_qualcomm_adreno(cve_id):
+def test_run_cve_check_qualcomm_adreno(monkeypatch, cve_id):
     """CVE should be validated, disclosed, and related to Adreno GPU."""
+    monkeypatch.setattr("autoemu.cve_validator.fetch_cve_details", _fake_cve_details)
+    monkeypatch.setattr("autoemu.cve_validator.search_cve_poc", _fake_poc_findings)
+
     result = run_cve_check(cve_id, peripheral_name="GPU", mcu_name="Qualcomm Adreno")
     assert result["valid_format"] is True
     assert result["disclosed"] is True
@@ -36,6 +61,12 @@ def test_run_cve_check_qualcomm_adreno(cve_id):
 def test_pipeline_with_cve_2022_25664_records_poc_results(monkeypatch, tmp_path):
     """The full pipeline should record CVE findings and phase-5 PoC results."""
     runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    monkeypatch.setattr("autoemu.cve_validator.fetch_cve_details", _fake_cve_details)
+    monkeypatch.setattr("autoemu.cve_validator.search_cve_poc", _fake_poc_findings)
+    monkeypatch.setattr(
+        "autoemu.cve_validator.fetch_cve_driver_sources",
+        lambda *args, **kwargs: {"downloaded": [], "count": 0},
+    )
 
     out = tmp_path / "output"
     out.mkdir()
@@ -55,10 +86,22 @@ def test_pipeline_with_cve_2022_25664_records_poc_results(monkeypatch, tmp_path)
     def fake_do_validate(self, output_dir, **kw):
         return {"success": True, "files_checked": 2, "errors": [], "warnings": []}
 
+    def fake_do_test(self, *, cve_findings=None, **kw):
+        return {
+            "success": True,
+            "skipped": False,
+            "reason": "",
+            "poc_results": [
+                {"title": finding["title"], "url": finding["url"], "success": False}
+                for finding in (cve_findings or {}).get("poc_findings", [])
+            ],
+        }
+
     import types
     runtime._do_fetch = types.MethodType(fake_do_fetch, runtime)
     runtime._do_build = types.MethodType(fake_do_build, runtime)
     runtime._do_validate = types.MethodType(fake_do_validate, runtime)
+    runtime._do_test = types.MethodType(fake_do_test, runtime)
 
     # Create a fake QEMU build env so phase 5 doesn't skip
     env = tmp_path / "env" / "build" / "qemu-qualcomm_adreno"

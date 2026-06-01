@@ -199,10 +199,19 @@ typedef struct {
 #define GPU_STATUS              0x34    /* (RO) status register */
 #define JOB_INT_RAWSTAT         0x1000
 #define JOB_INT_CLEAR           0x1004
+#define JOB_INT_MASK            0x1008
+#define JOB_INT_STAT            0x100C
+#define MMU_INT_RAWSTAT         0x2000
+#define MMU_INT_CLEAR           0x2004
+#define MMU_INT_MASK            0x2008
+#define MMU_INT_STAT            0x200C
 #define JS_BASE                 0x1800
 #define JS_SLOT_STRIDE          0x80
 #define JS_HEAD_LO(n)           (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x00)
 #define JS_STATUS(n)            (JS_BASE + ((n) * JS_SLOT_STRIDE) + 0x24)
+#define AS_BASE                 0x2400
+#define AS_SLOT_STRIDE          0x40
+#define AS_COMMAND(n)           (AS_BASE + ((n) * AS_SLOT_STRIDE) + 0x18)
 #define JS_COMMAND_START        0x01
 #define JS_CONFIG_END_FLUSH_CLEAN_INVALIDATE (3u << 12)
 #define JS_CONFIG_THREAD_PRI(n) ((n) << 16)
@@ -219,11 +228,17 @@ typedef struct {
         assert "JOB_INT_RAWSTAT" in names
         assert "JS_HEAD_LO_0" in names
         assert "JS_STATUS_1" in names
+        assert "AS_COMMAND_0" in names
         assert "JS_BASE" not in names
         assert "JS_CONFIG_END_FLUSH_CLEAN_INVALIDATE" not in names
         assert "JS_CONFIG_THREAD_PRI_1" not in names
         assert block.get_register("GPU_CMD").access.value == "WO"
         assert block.get_register("GPU_STATUS").access.value == "RO"
+        assert block.get_register("JOB_INT_CLEAR").access.value == "W1C"
+        assert block.get_register("MMU_INT_CLEAR").access.value == "W1C"
+        assert block.get_register("JOB_INT_STAT").access.value == "RO"
+        assert block.get_register("MMU_INT_STAT").access.value == "RO"
+        assert block.get_register("AS_COMMAND_0").access.value == "WO"
         assert block.get_register("JS_STATUS_1").offset == 0x18A4
 
 
@@ -615,7 +630,7 @@ static irqreturn_t panfrost_jm_irq_handler(int irq, void *data)
     def test_linux_init_sequence_extraction(self):
         analysis = analyze_driver_string(
             """\
-static int panfrost_device_init(struct panfrost_device *pfdev)
+int panfrost_device_init(struct panfrost_device *pfdev)
 {
     writel(0, pfdev->iomem + GPU_INT_CLEAR);
     writel(ALL_JS_INT_MASK, pfdev->iomem + JOB_INT_MASK);
@@ -630,3 +645,47 @@ static int panfrost_device_init(struct panfrost_device *pfdev)
         assert "GPU_INT_CLEAR" in regs
         assert "JOB_INT_MASK" in regs
         assert "JS_COMMAND_NEXT" in regs
+
+    def test_linux_non_static_driver_functions_are_parsed(self):
+        analysis = analyze_driver_string(
+            """\
+int panfrost_device_init(struct panfrost_device *pfdev)
+{
+    u32 id = gpu_read(pfdev, GPU_ID);
+    gpu_write(pfdev, GPU_INT_MASK, 0);
+    return id ? 0 : -ENODEV;
+}
+
+void panfrost_device_fini(struct panfrost_device *pfdev)
+{
+    gpu_write(pfdev, GPU_INT_MASK, 0);
+}
+""",
+            "GPU",
+        )
+
+        functions = {a.in_function for a in analysis.register_accesses}
+        assert "panfrost_device_init" in functions
+        assert "panfrost_device_fini" in functions
+        init_regs = [a.register for a in analysis.init_sequences[0].accesses]
+        assert "GPU_ID" in init_regs
+        assert "GPU_INT_MASK" in init_regs
+
+    def test_linux_helper_functions_with_register_accesses_are_parsed(self):
+        analysis = analyze_driver_string(
+            """\
+static void panfrost_jm_handle_irqs(struct panfrost_device *pfdev)
+{
+    u32 status;
+
+    status = job_read(pfdev, JOB_INT_STAT);
+    if (status)
+        job_write(pfdev, JOB_INT_CLEAR, status);
+}
+""",
+            "GPU",
+        )
+
+        regs = [a.register for a in analysis.register_accesses]
+        assert "JOB_INT_STAT" in regs
+        assert "JOB_INT_CLEAR" in regs

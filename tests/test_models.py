@@ -52,6 +52,12 @@ class TestRegister:
         result = reg.apply_write(0x01, 0x00)
         assert result & 0x01 == 1
 
+    def test_apply_write_register_level_w1c(self):
+        reg = Register(name="INT_CLEAR", offset=0x00, access=AccessType.W1C)
+
+        assert reg.apply_write(0b1111, 0b0101) == 0b1010
+        assert reg.apply_write(0b1111, 0) == 0b1111
+
     def test_apply_read_normal(self):
         reg = Register(name="DR", offset=0x00)
         read_val, new_val = reg.apply_read(0x1234)

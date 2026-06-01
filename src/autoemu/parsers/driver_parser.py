@@ -117,9 +117,10 @@ _RE_IT_CHECK = re.compile(
     r"__HAL_(\w+)_GET_IT_SOURCE\s*\(\s*\w+\s*,\s*(\w+)\s*\)"
 )
 _RE_FUNC_DEF = re.compile(
-    r"^(?:HAL_StatusTypeDef|void|static\s+void|static\s+HAL_StatusTypeDef|"
-    r"static\s+irqreturn_t|irqreturn_t|static\s+int|static\s+uint32_t)"
-    r"\s+(HAL_\w+|LL_\w+|\w+_irq_handler|\w+_handler|\w+_init|\w+_probe|\w+_fini)\s*\(",
+    r"^(?:static\s+)?(?:inline\s+)?(?:(?:const\s+)?(?:HAL_StatusTypeDef|"
+    r"irqreturn_t|void|int|bool|u32|u64|uint32_t|uint64_t|ssize_t|long|"
+    r"char\s*\*)|enum\s+\w+|struct\s+\w+\s*\*)"
+    r"\s+([A-Za-z_]\w*)\s*\(",
     re.MULTILINE,
 )
 _RE_ISR_FUNC = re.compile(
