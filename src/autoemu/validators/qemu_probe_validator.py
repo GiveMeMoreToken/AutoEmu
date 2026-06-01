@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,6 +32,16 @@ LINUX_BOOT_MARKERS = (
     "Freeing unused kernel memory",
     "Run /sbin/init",
 )
+_DTS_MACROS = {
+    "GIC_SPI": "0",
+    "GIC_PPI": "1",
+    "IRQ_TYPE_NONE": "0",
+    "IRQ_TYPE_EDGE_RISING": "1",
+    "IRQ_TYPE_EDGE_FALLING": "2",
+    "IRQ_TYPE_EDGE_BOTH": "3",
+    "IRQ_TYPE_LEVEL_HIGH": "4",
+    "IRQ_TYPE_LEVEL_LOW": "8",
+}
 
 
 @dataclass(frozen=True)
@@ -208,6 +219,7 @@ def run_qemu_probe(
                 capture_output=True,
                 text=True,
                 check=False,
+                env=_stage5_subprocess_env(),
                 timeout=60,
             )
             _log_stage5_process(_log, "apply-to-qemu", proc_apply)
@@ -247,6 +259,7 @@ def run_qemu_probe(
             capture_output=True,
             text=True,
             check=False,
+            env=_stage5_subprocess_env(),
             timeout=DEFAULT_BUILD_TIMEOUT,
         )
         _log_stage5_process(_log, "ninja build graph refresh", proc_refresh)
@@ -306,6 +319,7 @@ def run_qemu_probe(
             capture_output=True,
             text=True,
             check=False,
+            env=_stage5_subprocess_env(),
             timeout=DEFAULT_BUILD_TIMEOUT,
         )
         _log_stage5_process(_log, "generated object rebuild", proc)
@@ -357,6 +371,7 @@ def run_qemu_probe(
             capture_output=True,
             text=True,
             check=False,
+            env=_stage5_subprocess_env(),
             timeout=DEFAULT_BUILD_TIMEOUT,
         )
         _log_stage5_process(_log, "QEMU system binary rebuild", proc_system)
@@ -406,6 +421,27 @@ def run_qemu_probe(
             "probe_status": "skipped",
             "boot_assets": {},
         }
+
+    prepared_dtb = _prepare_probe_dtb(
+        boot_assets,
+        output_dir=gen_dir,
+        target_mcu=target_mcu,
+        target_peripheral=target_peripheral,
+        on_progress=_log,
+    )
+    if prepared_dtb is not None:
+        boot_assets = replace(boot_assets, dtb=prepared_dtb)
+
+    prepared_rootfs = _prepare_probe_rootfs(
+        boot_assets,
+        build_env=build_env,
+        output_dir=gen_dir,
+        target_mcu=target_mcu,
+        target_peripheral=target_peripheral,
+        on_progress=_log,
+    )
+    if prepared_rootfs is not None:
+        boot_assets = replace(boot_assets, rootfs=prepared_rootfs)
 
     boot_result = _run_guest_linux_probe(
         boot_assets,
@@ -531,6 +567,7 @@ def _test_poc_sources(
                 capture_output=True,
                 text=True,
                 check=False,
+                env=_stage5_subprocess_env(),
                 timeout=60,
             )
         except Exception as exc:
@@ -611,6 +648,840 @@ def _log_stage5_stream(
         return
     trimmed = text[-limit:] if len(text) > limit else text
     on_progress(f"Stage 5 {label}:\n{trimmed.rstrip()}", kind)
+
+
+def _stage5_subprocess_env() -> dict[str, str]:
+    """Return an environment suitable for external toolchain/QEMU commands."""
+    env = os.environ.copy()
+    pyinstaller_dirs = {
+        value
+        for key, value in env.items()
+        if key.startswith("_PYI") and value
+    }
+
+    ld_library_path = env.get("LD_LIBRARY_PATH", "")
+    if ld_library_path:
+        kept = [
+            part for part in ld_library_path.split(os.pathsep)
+            if part and not _looks_like_pyinstaller_path(part, pyinstaller_dirs)
+        ]
+        if kept:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(kept)
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+
+    for key in list(env):
+        if key.startswith("_PYI") or key.startswith("PYINSTALLER"):
+            env.pop(key, None)
+
+    return env
+
+
+def _looks_like_pyinstaller_path(path: str, pyinstaller_dirs: set[str]) -> bool:
+    path_obj = Path(path)
+    if any(path == base or path.startswith(f"{base}{os.sep}") for base in pyinstaller_dirs):
+        return True
+    return path_obj.name.startswith("_MEI")
+
+
+def _prepare_probe_dtb(
+    assets: BootAssets,
+    *,
+    output_dir: Path,
+    target_mcu: str,
+    target_peripheral: str,
+    on_progress: Callable[[str, str], None],
+) -> Path | None:
+    """Build an output-local DTB from a generated DTS overlay for Linux probing."""
+    dtso = _select_probe_dtso(output_dir, target_peripheral)
+    if dtso is None:
+        return None
+    output_probe_dtb = output_dir / "probe.dtb"
+    if assets.dtb is not None and assets.dtb.resolve() != output_probe_dtb.resolve():
+        return None
+
+    dtc = shutil.which("dtc")
+    fdtoverlay = shutil.which("fdtoverlay")
+    missing_tools = [name for name, path in (("dtc", dtc), ("fdtoverlay", fdtoverlay)) if not path]
+    if missing_tools:
+        on_progress(
+            "Cannot build probe DTB; missing tool(s): " + ", ".join(missing_tools),
+            "warn",
+        )
+        return None
+
+    base_dtb = output_dir / "probe-base.dtb"
+    overlay_dts = output_dir / "probe-overlay.dts"
+    overlay_dtbo = output_dir / "probe.dtbo"
+    probe_dtb = output_dir / "probe.dtb"
+
+    on_progress(
+        f"Building probe DTB from generated device-tree overlay: {dtso}",
+        "compile",
+    )
+    try:
+        overlay_dts.write_text(
+            _build_probe_overlay_source(dtso, output_dir, target_mcu, target_peripheral),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        on_progress(f"Cannot prepare probe overlay source: {exc}", "warn")
+        return None
+
+    dump_cmd = [
+        str(assets.qemu_bin),
+        "-M",
+        _machine_with_dumpdtb(assets.machine, base_dtb),
+        "-machine",
+        "accel=tcg",
+    ]
+    dtc_cmd = [dtc, "-@", "-I", "dts", "-O", "dtb", "-o", str(overlay_dtbo), str(overlay_dts)]
+    overlay_cmd = [fdtoverlay, "-i", str(base_dtb), "-o", str(probe_dtb), str(overlay_dtbo)]
+
+    for cmd, label in (
+        (dump_cmd, "QEMU base DTB dump"),
+        (dtc_cmd, "device-tree overlay compile"),
+        (overlay_cmd, "device-tree overlay apply"),
+    ):
+        _log_stage5_command(on_progress, cmd)
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=_stage5_subprocess_env(),
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            on_progress(f"Stage 5 result: timeout after 60s ({label})", "warn")
+            return None
+        except Exception as exc:
+            on_progress(f"Stage 5 {label} failed: {exc}", "warn")
+            return None
+        _log_stage5_process(on_progress, label, proc)
+        if proc.returncode != 0:
+            return None
+
+    if not probe_dtb.exists():
+        on_progress(f"Probe DTB was not created: {probe_dtb}", "warn")
+        return None
+
+    on_progress(f"Using generated probe DTB for Linux boot: {probe_dtb}", "compile")
+    return probe_dtb
+
+
+def _prepare_probe_rootfs(
+    assets: BootAssets,
+    *,
+    build_env: Path,
+    output_dir: Path,
+    target_mcu: str,
+    target_peripheral: str,
+    on_progress: Callable[[str, str], None],
+) -> Path | None:
+    """Create a rootfs copy that loads matching Linux driver modules."""
+    linux_build = _linux_build_dir_for_arch(build_env, assets.arch)
+    if linux_build is None:
+        return None
+
+    modules = _probe_module_closure(linux_build, target_mcu, target_peripheral)
+    if not modules:
+        return None
+
+    e2mkdir = shutil.which("e2mkdir")
+    e2cp = shutil.which("e2cp")
+    if not e2mkdir or not e2cp:
+        on_progress("Cannot prepare Stage 5 rootfs; e2tools are missing", "warn")
+        return None
+
+    stage5_rootfs = output_dir / f"rootfs-{assets.arch}-stage5.ext4"
+    source_rootfs = assets.rootfs
+    if assets.rootfs.resolve() == stage5_rootfs.resolve():
+        base_rootfs = build_env.parent.parent / "output" / f"rootfs-{assets.arch}.ext4"
+        if not base_rootfs.exists():
+            return None
+        source_rootfs = base_rootfs
+    try:
+        shutil.copy2(source_rootfs, stage5_rootfs)
+    except Exception as exc:
+        on_progress(f"Cannot copy Stage 5 rootfs: {exc}", "warn")
+        return None
+    if not _run_rootfs_fsck(stage5_rootfs, on_progress):
+        return None
+
+    module_dir = "/lib/modules/autoemu-stage5"
+    on_progress(
+        f"Preparing Stage 5 rootfs with Linux probe module(s): "
+        + ", ".join(path.name for path in modules),
+        "compile",
+    )
+
+    for directory in ("/lib", "/lib/modules", module_dir, "/etc", "/etc/init.d"):
+        _run_e2tool([e2mkdir, f"{stage5_rootfs}:{directory}"], on_progress, "rootfs directory create")
+
+    for module in modules:
+        cmd = [e2cp, str(module), f"{stage5_rootfs}:{module_dir}/{module.name}"]
+        if not _run_e2tool(cmd, on_progress, "rootfs module copy"):
+            return None
+
+    init_script = output_dir / "autoemu-stage5-init"
+    init_script.write_text(
+        _stage5_module_init_script(module_dir, modules),
+        encoding="utf-8",
+    )
+    init_script.chmod(0o755)
+    if not _run_e2tool(
+        [e2cp, "-P", "755", str(init_script), f"{stage5_rootfs}:/etc/init.d/S05autoemu-probe"],
+        on_progress,
+        "rootfs probe init copy",
+    ):
+        return None
+
+    if not _run_rootfs_fsck(stage5_rootfs, on_progress):
+        return None
+
+    return stage5_rootfs
+
+
+def _run_rootfs_fsck(
+    rootfs: Path,
+    on_progress: Callable[[str, str], None],
+) -> bool:
+    e2fsck = shutil.which("e2fsck")
+    if not e2fsck:
+        return True
+    cmd = [e2fsck, "-fy", str(rootfs)]
+    _log_stage5_command(on_progress, cmd)
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_stage5_subprocess_env(),
+            timeout=120,
+        )
+    except Exception as exc:
+        on_progress(f"Stage 5 rootfs fsck failed: {exc}", "warn")
+        return False
+    kind = "compile" if proc.returncode in (0, 1) else "fail"
+    on_progress(f"Stage 5 result: returncode={proc.returncode} (rootfs fsck)", kind)
+    _log_stage5_stream(on_progress, "stdout", proc.stdout, "compile")
+    stderr_kind = "warn" if proc.returncode in (0, 1) else "fail"
+    _log_stage5_stream(on_progress, "stderr", proc.stderr, stderr_kind)
+    return proc.returncode in (0, 1)
+
+
+def _run_e2tool(
+    cmd: list[str],
+    on_progress: Callable[[str, str], None],
+    label: str,
+) -> bool:
+    _log_stage5_command(on_progress, cmd)
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_stage5_subprocess_env(),
+            timeout=60,
+        )
+    except Exception as exc:
+        on_progress(f"Stage 5 {label} failed: {exc}", "warn")
+        return False
+    _log_stage5_process(on_progress, label, proc)
+    return proc.returncode == 0 or label == "rootfs directory create"
+
+
+def _linux_build_dir_for_arch(build_env: Path, arch: str) -> Path | None:
+    candidates = [
+        build_env.parent / f"linux-{arch}",
+        build_env.parent.parent / "build" / f"linux-{arch}",
+        Path("env") / "build" / f"linux-{arch}",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _probe_module_closure(
+    linux_build: Path,
+    target_mcu: str,
+    target_peripheral: str,
+) -> list[Path]:
+    candidates = _probe_module_candidates(linux_build, target_mcu, target_peripheral)
+    if not candidates:
+        return []
+
+    all_modules = sorted(linux_build.rglob("*.ko"))
+    module_index: dict[str, Path] = {}
+    for module in all_modules:
+        for name in _module_names(module):
+            module_index.setdefault(name, module)
+
+    ordered: list[Path] = []
+    visiting: set[Path] = set()
+    visited: set[Path] = set()
+
+    def add(module: Path) -> None:
+        if module in visited or module in visiting:
+            return
+        visiting.add(module)
+        for dep in _module_dependencies(module):
+            dep_path = module_index.get(dep) or module_index.get(dep.replace("-", "_"))
+            if dep_path is not None:
+                add(dep_path)
+        visiting.remove(module)
+        visited.add(module)
+        ordered.append(module)
+
+    for candidate in candidates:
+        add(candidate)
+    return ordered
+
+
+def _probe_module_candidates(
+    linux_build: Path,
+    target_mcu: str,
+    target_peripheral: str,
+) -> list[Path]:
+    prefixes: set[str] = set()
+    target_root = Path("data") / _snake(target_mcu) / "driver"
+    peripheral = _snake(target_peripheral)
+    peripheral_terms = {
+        term for term in {peripheral, target_peripheral.lower(), *peripheral.split("_")}
+        if len(term) >= 3
+    }
+    if target_root.exists():
+        for path in sorted(target_root.rglob("*.[ch]")):
+            stem = path.stem.lower()
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+            except OSError:
+                text = ""
+            if peripheral_terms and not any(term in stem or term in text for term in peripheral_terms):
+                continue
+            if stem:
+                prefixes.add(stem.split("_", 1)[0])
+    if len(peripheral) >= 4:
+        prefixes.add(peripheral)
+
+    candidates: list[Path] = []
+    for prefix in sorted(prefixes):
+        if len(prefix) < 4:
+            continue
+        candidates.extend(sorted(linux_build.rglob(f"{prefix}.ko")))
+        candidates.extend(sorted(linux_build.rglob(f"{prefix}-*.ko")))
+        candidates.extend(sorted(linux_build.rglob(f"{prefix}_*.ko")))
+    return _dedupe_paths(candidates)
+
+
+def _module_names(module: Path) -> set[str]:
+    names = {module.stem, module.stem.replace("_", "-"), module.stem.replace("-", "_")}
+    modinfo = shutil.which("modinfo")
+    if not modinfo:
+        return names
+    try:
+        proc = subprocess.run(
+            [modinfo, "-F", "name", str(module)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_stage5_subprocess_env(),
+            timeout=30,
+        )
+    except Exception:
+        return names
+    if proc.returncode == 0:
+        name = proc.stdout.strip()
+        if name:
+            names.update({name, name.replace("_", "-"), name.replace("-", "_")})
+    return names
+
+
+def _module_dependencies(module: Path) -> list[str]:
+    modinfo = shutil.which("modinfo")
+    if not modinfo:
+        return []
+    try:
+        proc = subprocess.run(
+            [modinfo, "-F", "depends", str(module)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_stage5_subprocess_env(),
+            timeout=30,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    deps = [item.strip() for item in proc.stdout.strip().split(",") if item.strip()]
+    normalized: list[str] = []
+    for dep in deps:
+        normalized.extend([dep, dep.replace("_", "-"), dep.replace("-", "_")])
+    return normalized
+
+
+def _stage5_module_init_script(module_dir: str, modules: list[Path]) -> str:
+    module_paths = " ".join(f"{module_dir}/{module.name}" for module in modules)
+    return (
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  start|\"\")\n"
+        "    echo \"AutoEmu Stage 5: loading Linux probe modules\"\n"
+        f"    for module in {module_paths}; do\n"
+        "      [ -e \"$module\" ] || continue\n"
+        "      insmod \"$module\" 2>&1 || true\n"
+        "    done\n"
+        "    ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(path)
+    return result
+
+
+def _select_probe_dtso(output_dir: Path, target_peripheral: str) -> Path | None:
+    peripheral = _snake(target_peripheral)
+    preferred = output_dir / f"{peripheral}.dtso"
+    if preferred.exists():
+        return preferred
+    candidates = sorted(output_dir.glob("*.dtso"))
+    return candidates[0] if candidates else None
+
+
+def _machine_with_dumpdtb(machine: str, dtb_path: Path) -> str:
+    if "dumpdtb=" in machine:
+        return machine
+    return f"{machine},dumpdtb={dtb_path}"
+
+
+def _build_probe_overlay_source(
+    dtso_path: Path,
+    output_dir: Path,
+    target_mcu: str,
+    target_peripheral: str,
+) -> str:
+    """Create a plugin overlay source from generated and fetched evidence."""
+    text = _sanitize_dtso_text(dtso_path.read_text(encoding="utf-8", errors="ignore"))
+    node = _extract_first_dts_node(text)
+    if node is None:
+        return _wrap_raw_dtso_as_overlay(text)
+
+    node_name, body = node
+    docs = _dts_evidence_for_base(output_dir, target_mcu)
+    generated_compatibles = _dts_string_values(_extract_dts_property(text, "compatible"))
+    compatibles = _select_probe_compatibles(
+        output_dir=output_dir,
+        target_mcu=target_mcu,
+        target_peripheral=target_peripheral,
+        generated_compatibles=generated_compatibles,
+        doc_compatibles=docs.get("compatibles", []),
+    )
+    if not compatibles:
+        compatibles = generated_compatibles
+
+    reg_value = _extract_dts_property(text, "reg") or docs.get("reg", "")
+    interrupt_value = _normalize_dts_cells(
+        _extract_dts_property(text, "interrupts") or docs.get("interrupts", "")
+    )
+    interrupt_names = _select_probe_interrupt_names(target_mcu, target_peripheral, docs)
+    driver_text = "\n".join(_target_driver_source_texts(target_mcu, target_peripheral))
+    needs_clock = "devm_clk_get" in driver_text and not _extract_dts_property(body, "clocks")
+    supplies = _probe_supply_names(driver_text)
+
+    body_rest = body
+    for prop in (
+        "compatible",
+        "reg",
+        "interrupts",
+        "interrupt-names",
+        "clocks",
+        "clock-names",
+        "status",
+    ):
+        body_rest = _remove_dts_property(body_rest, prop)
+    for supply in supplies:
+        body_rest = _remove_dts_property(body_rest, f"{supply}-supply")
+
+    overlay_lines = [
+        "/dts-v1/;",
+        "/plugin/;",
+        "",
+        "/ {",
+        "    fragment@0 {",
+        "        target-path = \"/\";",
+        "        __overlay__ {",
+    ]
+    if needs_clock:
+        overlay_lines.extend([
+            "            autoemu_probe_clk: autoemu-probe-clock {",
+            "                compatible = \"fixed-clock\";",
+            "                #clock-cells = <0>;",
+            "                clock-frequency = <100000000>;",
+            "            };",
+            "",
+        ])
+    if supplies:
+        overlay_lines.extend([
+            "            autoemu_probe_regulator: autoemu-probe-regulator {",
+            "                compatible = \"regulator-fixed\";",
+            "                regulator-name = \"autoemu-probe\";",
+            "                regulator-min-microvolt = <1000000>;",
+            "                regulator-max-microvolt = <1000000>;",
+            "            };",
+            "",
+        ])
+
+    overlay_lines.append(f"            {node_name} {{")
+    if compatibles:
+        quoted = ", ".join(f'"{item}"' for item in compatibles)
+        overlay_lines.append(f"                compatible = {quoted};")
+    if reg_value:
+        overlay_lines.append(f"                reg = {_ensure_dts_value(reg_value)};")
+    if interrupt_value:
+        overlay_lines.append(f"                interrupts = {interrupt_value};")
+    if interrupt_names:
+        quoted_names = ", ".join(f'"{name}"' for name in interrupt_names)
+        overlay_lines.append(f"                interrupt-names = {quoted_names};")
+    if needs_clock:
+        overlay_lines.append("                clocks = <&autoemu_probe_clk>;")
+    for supply in supplies:
+        overlay_lines.append(f"                {supply}-supply = <&autoemu_probe_regulator>;")
+    overlay_lines.append("                status = \"okay\";")
+
+    for line in body_rest.splitlines():
+        stripped = line.strip()
+        if stripped:
+            overlay_lines.append(f"                {stripped}")
+
+    overlay_lines.extend([
+        "            };",
+        "        };",
+        "    };",
+        "};",
+        "",
+    ])
+    return "\n".join(overlay_lines)
+
+
+def _sanitize_dtso_text(text: str) -> str:
+    lines = [line for line in text.splitlines() if line.strip() != "EOF"]
+    return "\n".join(lines).strip() + "\n"
+
+
+def _wrap_raw_dtso_as_overlay(text: str) -> str:
+    if "/plugin/;" in text:
+        return text
+    return "/dts-v1/;\n/plugin/;\n\n" + text
+
+
+def _extract_first_dts_node(text: str) -> tuple[str, str] | None:
+    lines = text.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if "{" not in stripped or stripped.startswith("/") or stripped.startswith("fragment@"):
+            continue
+        if "@" in stripped or ":" in stripped:
+            start = idx
+            break
+    if start is None:
+        return None
+
+    node_lines: list[str] = []
+    depth = 0
+    for line in lines[start:]:
+        depth += line.count("{") - line.count("}")
+        node_lines.append(line)
+        if depth <= 0 and len(node_lines) > 1:
+            break
+
+    header = node_lines[0].strip().split("{", 1)[0].strip()
+    if ":" in header:
+        header = header.split(":", 1)[1].strip()
+    body = "\n".join(node_lines[1:-1])
+    return header, body
+
+
+def _extract_dts_property(text: str, prop: str) -> str:
+    pattern = re.compile(rf"(?ms)^\s*{re.escape(prop)}\s*=\s*(.*?);")
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _remove_dts_property(text: str, prop: str) -> str:
+    return re.sub(rf"(?ms)^\s*{re.escape(prop)}\s*=\s*.*?;\s*", "", text)
+
+
+def _dts_string_values(value: str) -> list[str]:
+    return [match.group(1) for match in re.finditer(r'"([^"]+)"', value)]
+
+
+def _ensure_dts_value(value: str) -> str:
+    value = value.strip()
+    return value if value.startswith("<") or value.startswith('"') else f"<{value}>"
+
+
+def _normalize_dts_cells(value: str) -> str:
+    if not value:
+        return ""
+    replaced = value
+    for name, replacement in _DTS_MACROS.items():
+        replaced = re.sub(rf"\b{re.escape(name)}\b", replacement, replaced)
+    cells = re.findall(r"0x[0-9a-fA-F]+|\b\d+\b", replaced)
+    if not cells:
+        return _ensure_dts_value(value)
+    numbers = [str(int(cell, 0)) for cell in cells]
+    return "<" + " ".join(numbers) + ">"
+
+
+def _dts_cell_numbers(value: str) -> list[int]:
+    normalized = _normalize_dts_cells(value)
+    return [int(cell, 0) for cell in re.findall(r"0x[0-9a-fA-F]+|\b\d+\b", normalized)]
+
+
+def _dts_evidence_for_base(output_dir: Path, target_mcu: str) -> dict[str, Any]:
+    base = _peripheral_base_address(output_dir)
+    if base is None:
+        return {}
+    docs_root = Path("data") / _snake(target_mcu) / "docs"
+    if not docs_root.exists():
+        return {}
+    for path in sorted(list(docs_root.rglob("*.dts")) + list(docs_root.rglob("*.dtsi"))):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for node_name, body in _iter_dts_nodes(text):
+            reg = _extract_dts_property(body, "reg")
+            if base not in _dts_cell_numbers(reg):
+                continue
+            return {
+                "node": node_name,
+                "reg": reg,
+                "interrupts": _extract_dts_property(body, "interrupts"),
+                "interrupt_names": _dts_string_values(_extract_dts_property(body, "interrupt-names")),
+                "compatibles": _dts_string_values(_extract_dts_property(body, "compatible")),
+            }
+    return {}
+
+
+def _iter_dts_nodes(text: str) -> list[tuple[str, str]]:
+    nodes: list[tuple[str, str]] = []
+    lines = _sanitize_dtso_text(text).splitlines()
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if "{" not in stripped or stripped.startswith("/") or stripped.startswith("#"):
+            idx += 1
+            continue
+        if "@" not in stripped and ":" not in stripped:
+            idx += 1
+            continue
+        depth = 0
+        node_lines: list[str] = []
+        for line in lines[idx:]:
+            depth += line.count("{") - line.count("}")
+            node_lines.append(line)
+            if depth <= 0 and len(node_lines) > 1:
+                break
+        header = node_lines[0].strip().split("{", 1)[0].strip()
+        if ":" in header:
+            header = header.split(":", 1)[1].strip()
+        nodes.append((header, "\n".join(node_lines[1:-1])))
+        idx += max(1, len(node_lines))
+    return nodes
+
+
+def _peripheral_base_address(output_dir: Path) -> int | None:
+    for json_path in sorted(output_dir.glob("*.json")):
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        found = _find_json_base_address(data)
+        if found is not None:
+            return found
+    return None
+
+
+def _find_json_base_address(value: Any) -> int | None:
+    if isinstance(value, dict):
+        if "base_address" in value:
+            parsed = _parse_int(value["base_address"])
+            if parsed is not None:
+                return parsed
+        for item in value.values():
+            found = _find_json_base_address(item)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_json_base_address(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _parse_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return None
+    return None
+
+
+def _select_probe_compatibles(
+    *,
+    output_dir: Path,
+    target_mcu: str,
+    target_peripheral: str,
+    generated_compatibles: list[str],
+    doc_compatibles: list[str],
+) -> list[str]:
+    driver_compatibles = _driver_compatible_strings(target_mcu, target_peripheral)
+    evidence_words = _probe_evidence_words(output_dir, target_mcu, target_peripheral)
+    selected_driver: list[str] = []
+    for compatible in driver_compatibles:
+        compatible_words = set(re.findall(r"[a-z][a-z0-9]+", compatible.lower()))
+        specific_words = compatible_words - {"arm", "mali", "gpu", "vendor", "compatible"}
+        if compatible in doc_compatibles or compatible in generated_compatibles:
+            selected_driver.append(compatible)
+        elif specific_words & evidence_words:
+            selected_driver.append(compatible)
+    if not selected_driver and len(driver_compatibles) <= 3:
+        selected_driver = driver_compatibles
+
+    return _dedupe([*selected_driver, *doc_compatibles, *generated_compatibles])
+
+
+def _driver_compatible_strings(target_mcu: str, target_peripheral: str) -> list[str]:
+    values: list[str] = []
+    for text in _target_driver_source_texts(target_mcu, target_peripheral):
+        values.extend(re.findall(r"\.compatible\s*=\s*\"([^\"]+)\"", text))
+    return _dedupe(values)
+
+
+def _probe_evidence_words(output_dir: Path, target_mcu: str, target_peripheral: str) -> set[str]:
+    words = {part for part in _snake(target_peripheral).split("_") if part}
+    docs_root = Path("data") / _snake(target_mcu) / "docs"
+    texts: list[str] = []
+    for json_path in sorted(output_dir.glob("*.json")):
+        try:
+            texts.append(json_path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            pass
+    if docs_root.exists():
+        for path in sorted(docs_root.rglob("*")):
+            if path.suffix.lower() not in (".md", ".txt", ".dts", ".dtsi"):
+                continue
+            try:
+                texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+    combined = "\n".join(texts).lower()
+    words.update(re.findall(r"\b(?:bifrost|midgard|valhall|t\d{3,4}|g\d{2,4})\b", combined))
+    for match in re.finditer(r"mali[\s_-]+([tg]\d{2,4})", combined):
+        words.add(match.group(1))
+    return words
+
+
+def _select_probe_interrupt_names(
+    target_mcu: str,
+    target_peripheral: str,
+    docs: dict[str, Any],
+) -> list[str]:
+    driver_names = _driver_irq_names(target_mcu, target_peripheral)
+    doc_names = [str(name).lower() for name in docs.get("interrupt_names", [])]
+    if doc_names and (not driver_names or set(doc_names).issubset(set(driver_names))):
+        return doc_names
+    return driver_names or doc_names
+
+
+def _driver_irq_names(target_mcu: str, target_peripheral: str) -> list[str]:
+    names: list[str] = []
+    for text in _target_driver_source_texts(target_mcu, target_peripheral):
+        names.extend(re.findall(r"platform_get_irq_byname\s*\([^;]*?\"([^\"]+)\"", text, re.S))
+    return _dedupe(names)
+
+
+def _probe_supply_names(driver_text: str) -> list[str]:
+    names: list[str] = []
+    for match in re.finditer(
+        r"const\s+char\s+\*\s+const\s+\w*supplies\[\]\s*=\s*\{(?P<body>.*?)\};",
+        driver_text,
+        re.S,
+    ):
+        names.extend(
+            value for value in re.findall(r'"([^"]+)"', match.group("body"))
+            if value.lower() != "null"
+        )
+    return _dedupe(names[:4])
+
+
+def _target_driver_source_texts(target_mcu: str, target_peripheral: str) -> list[str]:
+    target_root = Path("data") / _snake(target_mcu) / "driver"
+    source_paths: list[Path] = []
+    prefixes: set[str] = set()
+    if target_root.exists():
+        for path in sorted(target_root.rglob("*.[ch]")):
+            source_paths.append(path)
+            stem = path.stem.lower()
+            if stem:
+                prefixes.add(stem.split("_", 1)[0])
+
+    peripheral = _snake(target_peripheral)
+    if peripheral:
+        prefixes.add(peripheral)
+
+    linux_root = Path("env") / "src"
+    if linux_root.exists():
+        for prefix in sorted(prefixes):
+            if len(prefix) < 4:
+                continue
+            for path in sorted(linux_root.glob(f"linux-*/drivers/**/*{prefix}*.[ch]")):
+                source_paths.append(path)
+
+    texts: list[str] = []
+    seen: set[Path] = set()
+    for path in source_paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+    return texts
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def _boot_defaults(arch: str) -> dict[str, str]:
@@ -763,6 +1634,7 @@ def _run_guest_linux_probe(
             capture_output=True,
             text=True,
             check=False,
+            env=_stage5_subprocess_env(),
             timeout=assets.timeout,
         )
         _log_stage5_process(

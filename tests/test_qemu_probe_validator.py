@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from autoemu.validators.qemu_probe_validator import _analyze_probe_log, run_qemu_probe
+from autoemu.validators.qemu_probe_validator import (
+    _analyze_probe_log,
+    _build_probe_overlay_source,
+    run_qemu_probe,
+)
 
 
 def _write_build_ninja(build_env: Path, target_dir: str, c_name: str = "demo.c") -> str:
@@ -530,6 +534,328 @@ def test_run_qemu_probe_uses_output_probe_boot_artifacts(monkeypatch, tmp_path):
     assert "-dtb" in qemu_cmd
     assert str(output_dir / "probe.dtb") in qemu_cmd
     assert result["boot_assets"]["dtb"] == str(output_dir / "probe.dtb")
+
+
+def test_run_qemu_probe_builds_probe_dtb_from_dtso(monkeypatch, tmp_path):
+    """Generated DTS overlays should be converted to a probe DTB before boot."""
+    build_env = tmp_path / "env" / "build" / "qemu-aarch64"
+    build_env.mkdir(parents=True)
+    _write_build_ninja(build_env, "hw/misc", c_name="hikey960_gpu.c")
+    _write_boot_assets(build_env)
+    qemu_src = tmp_path / "env" / "src" / "qemu-9.2.0"
+    (qemu_src / "include" / "qemu").mkdir(parents=True)
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "gpu_peripheral.json").write_text(
+        json.dumps({"name": "GPU", "mcu_family": "HiSilicon Kirin"}),
+        encoding="utf-8",
+    )
+    (output_dir / "meson.build").write_text(
+        "system_ss.add(when: 'CONFIG_HIKEY960_GPU', if_true: files('hikey960_gpu.c'))\n",
+        encoding="utf-8",
+    )
+    (output_dir / "hikey960_gpu.c").write_text("int demo(void){return 0;}", encoding="utf-8")
+    (output_dir / "hikey960_gpu.h").write_text("#pragma once\n", encoding="utf-8")
+    (output_dir / "gpu.dtso").write_text(
+        """
+/ {
+    gpu@e82c0000 {
+        compatible = "hikey960-gpu";
+        reg = <0x0 0xe82c0000 0x0 0x00004000>;
+        interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,
+                     <GIC_SPI 125 IRQ_TYPE_LEVEL_HIGH>;
+    };
+};
+""",
+        encoding="utf-8",
+    )
+
+    def fake_which(name):
+        return {
+            "ninja": "/usr/bin/ninja",
+            "python3": "/usr/bin/python3",
+            "dtc": "/usr/bin/dtc",
+            "fdtoverlay": "/usr/bin/fdtoverlay",
+        }.get(name)
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.shutil.which", fake_which)
+
+    commands: list[list[str]] = []
+
+    class FakeCompletedProcess:
+        def __init__(self, stdout="", stderr=""):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        commands.append([str(part) for part in cmd])
+        cmd_text = " ".join(str(part) for part in cmd)
+        if "dumpdtb=" in cmd_text:
+            (output_dir / "probe-base.dtb").write_text("base dtb\n", encoding="utf-8")
+            return FakeCompletedProcess(stdout="dtb dumped\n")
+        if cmd[0] == "/usr/bin/dtc":
+            (output_dir / "probe.dtbo").write_text("overlay dtb\n", encoding="utf-8")
+            return FakeCompletedProcess(stdout="dtc ok\n")
+        if cmd[0] == "/usr/bin/fdtoverlay":
+            (output_dir / "probe.dtb").write_text("probe dtb\n", encoding="utf-8")
+            return FakeCompletedProcess(stdout="overlay ok\n")
+        if str(cmd[0]).endswith("qemu-system-aarch64"):
+            return FakeCompletedProcess(stdout="Linux version 6.12.28\npanfrost e82c0000.gpu: probe complete\n")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.subprocess.run", fake_run)
+
+    log: list[tuple[str, str]] = []
+    result = run_qemu_probe(
+        output_dir,
+        "Hikey960",
+        "GPU",
+        qemu_build_env=build_env,
+        on_progress=lambda msg, kind: log.append((msg, kind)),
+    )
+
+    qemu_cmd = commands[-1]
+    messages = "\n".join(msg for msg, _ in log)
+    assert result["success"] is True
+    assert any("dumpdtb=" in " ".join(cmd) for cmd in commands)
+    assert ["/usr/bin/dtc", "-@", "-I", "dts", "-O", "dtb", "-o", str(output_dir / "probe.dtbo"), str(output_dir / "probe-overlay.dts")] in commands
+    assert ["/usr/bin/fdtoverlay", "-i", str(output_dir / "probe-base.dtb"), "-o", str(output_dir / "probe.dtb"), str(output_dir / "probe.dtbo")] in commands
+    assert "-dtb" in qemu_cmd
+    assert str(output_dir / "probe.dtb") in qemu_cmd
+    assert result["boot_assets"]["dtb"] == str(output_dir / "probe.dtb")
+    assert "Building probe DTB from generated device-tree overlay" in messages
+    assert "Stage 5 result: returncode=0 (device-tree overlay compile)" in messages
+
+
+def test_build_probe_overlay_source_uses_dts_and_driver_evidence(monkeypatch, tmp_path):
+    """Probe overlays should use Linux-facing evidence instead of QEMU-only names."""
+    monkeypatch.chdir(tmp_path)
+    data_docs = tmp_path / "data" / "demo_board" / "docs"
+    data_driver = tmp_path / "data" / "demo_board" / "driver"
+    data_docs.mkdir(parents=True)
+    data_driver.mkdir(parents=True)
+    data_docs.joinpath("demo-gpu.dtsi").write_text(
+        """
+/ {
+    gpu: demo@1000 {
+        compatible = "vendor,doc-gpu";
+        reg = <0x0 0x1000 0x0 0x100>;
+        interrupt-names = "DOCIRQ";
+    };
+};
+""",
+        encoding="utf-8",
+    )
+    data_driver.joinpath("demo_gpu.c").write_text(
+        """
+static const struct of_device_id demo_match[] = {
+    { .compatible = "vendor,linux-demo" },
+    {}
+};
+static int demo_probe(struct platform_device *pdev)
+{
+    return platform_get_irq_byname(pdev, "probeirq");
+}
+""",
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_dir.joinpath("gpu_peripheral.json").write_text(
+        json.dumps({"name": "GPU", "base_address": 0x1000, "address_size": 0x100}),
+        encoding="utf-8",
+    )
+    dtso = output_dir / "gpu.dtso"
+    dtso.write_text(
+        """
+/ {
+    gpu@1000 {
+        compatible = "demo-board-gpu";
+        reg = <0x0 0x1000 0x0 0x100>;
+        interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;
+    };
+};
+EOF
+""",
+        encoding="utf-8",
+    )
+
+    source = _build_probe_overlay_source(dtso, output_dir, "Demo Board", "GPU")
+
+    assert 'compatible = "vendor,linux-demo", "vendor,doc-gpu", "demo-board-gpu";' in source
+    assert 'interrupt-names = "probeirq";' in source
+    assert "interrupts = <0 32 4>;" in source
+    assert "EOF" not in source
+    assert "/plugin/;" in source
+
+
+def test_run_qemu_probe_sanitizes_pyinstaller_env_for_external_qemu(monkeypatch, tmp_path):
+    """PyInstaller library paths should not leak into QEMU subprocesses."""
+    build_env = tmp_path / "env" / "build" / "qemu-aarch64"
+    build_env.mkdir(parents=True)
+    _write_build_ninja(build_env, "hw/misc", c_name="hikey960_gpu.c")
+    _write_boot_assets(build_env)
+    qemu_src = tmp_path / "env" / "src" / "qemu-9.2.0"
+    (qemu_src / "include" / "qemu").mkdir(parents=True)
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "gpu_peripheral.json").write_text(
+        json.dumps({"name": "GPU", "mcu_family": "HiSilicon Kirin"}),
+        encoding="utf-8",
+    )
+    (output_dir / "meson.build").write_text(
+        "system_ss.add(when: 'CONFIG_HIKEY960_GPU', if_true: files('hikey960_gpu.c'))\n",
+        encoding="utf-8",
+    )
+    (output_dir / "hikey960_gpu.c").write_text("int demo(void){return 0;}", encoding="utf-8")
+    (output_dir / "hikey960_gpu.h").write_text("#pragma once\n", encoding="utf-8")
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEIstage5:/usr/lib")
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", "/tmp/_MEIstage5")
+    monkeypatch.setattr(
+        "autoemu.validators.qemu_probe_validator.shutil.which",
+        lambda name: "/usr/bin/ninja" if name == "ninja" else "/usr/bin/python3",
+    )
+
+    captured_qemu_envs: list[dict[str, str]] = []
+
+    class FakeCompletedProcess:
+        def __init__(self, stdout=""):
+            self.returncode = 0
+            self.stdout = stdout
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        if str(cmd[0]).endswith("qemu-system-aarch64"):
+            captured_qemu_envs.append(kwargs["env"])
+            return FakeCompletedProcess(stdout="Linux version 6.12.28\npanfrost e82c0000.gpu: probe complete\n")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.subprocess.run", fake_run)
+
+    result = run_qemu_probe(output_dir, "Hikey960", "GPU", qemu_build_env=build_env)
+
+    assert result["success"] is True
+    assert captured_qemu_envs
+    qemu_env = captured_qemu_envs[-1]
+    assert qemu_env["LD_LIBRARY_PATH"] == "/usr/lib"
+    assert "_PYI_APPLICATION_HOME_DIR" not in qemu_env
+
+
+def test_run_qemu_probe_injects_matching_linux_modules_into_stage5_rootfs(monkeypatch, tmp_path):
+    """Stage 5 should boot a rootfs copy with matching driver modules installed."""
+    build_env = tmp_path / "env" / "build" / "qemu-aarch64"
+    build_env.mkdir(parents=True)
+    _write_build_ninja(build_env, "hw/misc", c_name="hikey960_gpu.c")
+    _write_boot_assets(build_env)
+    qemu_src = tmp_path / "env" / "src" / "qemu-9.2.0"
+    (qemu_src / "include" / "qemu").mkdir(parents=True)
+    linux_build = tmp_path / "env" / "build" / "linux-aarch64"
+    (linux_build / "include" / "config").mkdir(parents=True)
+    (linux_build / "include" / "config" / "kernel.release").write_text("6.12.28\n", encoding="utf-8")
+    module_dir = linux_build / "drivers" / "gpu" / "drm" / "panfrost"
+    module_dir.mkdir(parents=True)
+    panfrost_ko = module_dir / "panfrost.ko"
+    panfrost_ko.write_text("module\n", encoding="utf-8")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "gpu_peripheral.json").write_text(
+        json.dumps({"name": "GPU", "mcu_family": "HiSilicon Kirin"}),
+        encoding="utf-8",
+    )
+    (output_dir / "meson.build").write_text(
+        "system_ss.add(when: 'CONFIG_HIKEY960_GPU', if_true: files('hikey960_gpu.c'))\n",
+        encoding="utf-8",
+    )
+    (output_dir / "hikey960_gpu.c").write_text("int demo(void){return 0;}", encoding="utf-8")
+    (output_dir / "hikey960_gpu.h").write_text("#pragma once\n", encoding="utf-8")
+    (output_dir / "gpu.dtso").write_text(
+        """
+/ {
+    gpu@e82c0000 {
+        compatible = "hikey960-gpu";
+        reg = <0x0 0xe82c0000 0x0 0x00004000>;
+        interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_HIGH>;
+    };
+};
+""",
+        encoding="utf-8",
+    )
+
+    copied_rootfs: list[tuple[Path, Path]] = []
+
+    def fake_copy2(src, dst):
+        copied_rootfs.append((Path(src), Path(dst)))
+        Path(dst).write_text("stage5 rootfs\n", encoding="utf-8")
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.shutil.copy2", fake_copy2)
+
+    def fake_which(name):
+        return {
+            "ninja": "/usr/bin/ninja",
+            "python3": "/usr/bin/python3",
+            "dtc": "/usr/bin/dtc",
+            "fdtoverlay": "/usr/bin/fdtoverlay",
+            "modinfo": "/usr/sbin/modinfo",
+            "e2mkdir": "/usr/bin/e2mkdir",
+            "e2cp": "/usr/bin/e2cp",
+            "e2fsck": "/usr/sbin/e2fsck",
+        }.get(name)
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.shutil.which", fake_which)
+
+    commands: list[list[str]] = []
+
+    class FakeCompletedProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        cmd = [str(part) for part in cmd]
+        commands.append(cmd)
+        if cmd[:3] == ["/usr/sbin/modinfo", "-F", "name"]:
+            return FakeCompletedProcess(stdout="panfrost\n")
+        if cmd[:3] == ["/usr/sbin/modinfo", "-F", "depends"]:
+            return FakeCompletedProcess(stdout="\n")
+        if "dumpdtb=" in " ".join(cmd):
+            (output_dir / "probe-base.dtb").write_text("base dtb\n", encoding="utf-8")
+            return FakeCompletedProcess()
+        if cmd[0] == "/usr/bin/dtc":
+            (output_dir / "probe.dtbo").write_text("overlay dtb\n", encoding="utf-8")
+            return FakeCompletedProcess()
+        if cmd[0] == "/usr/bin/fdtoverlay":
+            (output_dir / "probe.dtb").write_text("probe dtb\n", encoding="utf-8")
+            return FakeCompletedProcess()
+        if cmd[0] in {"/usr/bin/e2mkdir", "/usr/bin/e2cp"}:
+            return FakeCompletedProcess()
+        if cmd[0].endswith("qemu-system-aarch64"):
+            return FakeCompletedProcess(stdout="Linux version 6.12.28\npanfrost e82c0000.gpu: probe complete\n")
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr("autoemu.validators.qemu_probe_validator.subprocess.run", fake_run)
+
+    result = run_qemu_probe(output_dir, "Hikey960", "GPU", qemu_build_env=build_env)
+
+    qemu_cmd = commands[-1]
+    assert result["success"] is True
+    assert copied_rootfs == [
+        (tmp_path / "env" / "output" / "rootfs-aarch64.ext4", output_dir / "rootfs-aarch64-stage5.ext4")
+    ]
+    assert f"file={output_dir / 'rootfs-aarch64-stage5.ext4'},format=raw,if=virtio" in qemu_cmd
+    assert ["/usr/sbin/e2fsck", "-fy", str(output_dir / "rootfs-aarch64-stage5.ext4")] in commands
+    assert any(cmd[0] == "/usr/bin/e2cp" and str(panfrost_ko) in cmd for cmd in commands)
+    assert any(
+        cmd[:3] == ["/usr/bin/e2cp", "-P", "755"] and "S05autoemu-probe" in cmd[-1]
+        for cmd in commands
+    )
 
 
 def test_run_qemu_probe_reports_qemu_startup_failure(monkeypatch, tmp_path):
