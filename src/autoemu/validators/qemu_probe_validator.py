@@ -791,6 +791,7 @@ def _run_guest_linux_probe(
         target_mcu=target_mcu,
         target_peripheral=target_peripheral,
     )
+    _log_stage5_probe_summary(on_progress, analysis)
     return {
         **analysis,
         "qemu_cmd": cmd,
@@ -803,6 +804,24 @@ def _run_guest_linux_probe(
             "dtb": str(assets.dtb) if assets.dtb else "",
         },
     }
+
+
+def _log_stage5_probe_summary(
+    on_progress: Callable[[str, str], None],
+    analysis: dict[str, Any],
+) -> None:
+    """Emit the final guest-probe classification and matched probe lines."""
+    status = str(analysis.get("probe_status") or "unknown")
+    reason = str(analysis.get("reason") or "").strip()
+    kind = "info" if analysis.get("success") else "warn"
+    message = f"Stage 5 probe result: {status}"
+    if reason:
+        message = f"{message} - {reason}"
+    on_progress(message, kind)
+    for line in analysis.get("probe_lines", [])[:20]:
+        clean = str(line).strip()
+        if clean:
+            on_progress(f"Stage 5 probe line: {clean}", kind)
 
 
 def _probe_tokens(output_dir: Path, target_mcu: str, target_peripheral: str) -> list[str]:

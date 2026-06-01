@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
 from autoemu.tui.widgets import LogPanel, PipelinePhaseList
@@ -49,16 +53,50 @@ def _final_phase_status_actions(result) -> list[tuple[str, int]]:
     return actions
 
 
+class UiThreadCall(Message, bubble=False):
+    """Message carrying a widget update from a worker thread to the UI thread."""
+
+    def __init__(
+        self,
+        callback: Callable[..., Any],
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__()
+        self.callback = callback
+        self.args = args
+        self.kwargs = kwargs or {}
+
+
+def _post_ui_call(app, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    """Queue a UI-thread callback without blocking the pipeline worker."""
+    app.post_message(UiThreadCall(callback, args, kwargs))
+
+
+def _run_ui_thread_call(message: UiThreadCall) -> None:
+    """Execute a queued UI-thread callback."""
+    message.callback(*message.args, **message.kwargs)
+
+
+def _save_log_from_ui(log: LogPanel) -> None:
+    """Persist the current log from the UI thread."""
+    try:
+        path = log.save_to_file()
+        log.write(f"[dim]Log saved -> {path}[/]")
+    except Exception:
+        pass
+
+
 def _schedule_progress_update(app, phases, log, progress) -> None:
     """Schedule a pipeline progress update on Textual's UI thread."""
     if progress.error:
-        app.call_from_thread(log.log_error, f"Pipeline error: {progress.error}")
+        _post_ui_call(app, log.log_error, f"Pipeline error: {progress.error}")
         return
     if progress.finished:
         return
-    app.call_from_thread(phases.set_phase_running, progress.phase)
+    _post_ui_call(app, phases.set_phase_running, progress.phase)
     if progress.detail:
-        app.call_from_thread(log.log_kind, progress.detail, progress.kind)
+        _post_ui_call(app, log.log_kind, progress.detail, progress.kind)
 
 
 class SettingsScreen(Container):
@@ -281,6 +319,10 @@ class AutoEmuApp(App):
         Binding("ctrl+l", "save_log", "Save log", show=True),
     ]
 
+    def on_ui_thread_call(self, message: UiThreadCall) -> None:
+        """Run a callback queued by a worker thread."""
+        _run_ui_thread_call(message)
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Static(BANNER, id="banner")
@@ -410,13 +452,13 @@ class AutoEmuApp(App):
         log = self.query_one("#log", LogPanel)
         phases = self.query_one("#phase-list", PipelinePhaseList)
 
-        self.app.call_from_thread(phases.reset_phases)
-        self.app.call_from_thread(log.clear)
-        self.app.call_from_thread(log.clear_log_buffer)
+        _post_ui_call(self.app, phases.reset_phases)
+        _post_ui_call(self.app, log.clear)
+        _post_ui_call(self.app, log.clear_log_buffer)
 
-        self.app.call_from_thread(log.log_info, f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
+        _post_ui_call(self.app, log.log_info, f"Starting pipeline for [bold]{mcu}[/] / [bold]{periph}[/] ...")
         if cve_id:
-            self.app.call_from_thread(log.log_info, f"CVE target: [bold]{cve_id}[/]")
+            _post_ui_call(self.app, log.log_info, f"CVE target: [bold]{cve_id}[/]")
 
         def on_progress(p: PipelineProgress) -> None:
             _schedule_progress_update(self.app, phases, log, p)
@@ -431,30 +473,30 @@ class AutoEmuApp(App):
             )
 
             for method_name, phase in _final_phase_status_actions(result):
-                self.app.call_from_thread(getattr(phases, method_name), phase)
+                _post_ui_call(self.app, getattr(phases, method_name), phase)
 
             if result.success:
-                self.app.call_from_thread(log.log_success, "Pipeline completed!")
+                _post_ui_call(self.app, log.log_success, "Pipeline completed!")
             else:
-                self.app.call_from_thread(log.log_error, f"Pipeline failed: {result.error}")
+                _post_ui_call(self.app, log.log_error, f"Pipeline failed: {result.error}")
 
             if result.platform:
-                self.app.call_from_thread(log.log_info, f"Platform: [bold]{result.platform}[/]")
+                _post_ui_call(self.app, log.log_info, f"Platform: [bold]{result.platform}[/]")
 
             if result.generated_files:
-                self.app.call_from_thread(log.log_info, f"Generated [bold]{len(result.generated_files)}[/] file(s):")
+                _post_ui_call(self.app, log.log_info, f"Generated [bold]{len(result.generated_files)}[/] file(s):")
                 for f in result.generated_files[:20]:
-                    self.app.call_from_thread(log.write, f"  [cyan]{f}[/]")
+                    _post_ui_call(self.app, log.write, f"  [cyan]{f}[/]")
                 if len(result.generated_files) > 20:
-                    self.app.call_from_thread(log.write, f"  ... and {len(result.generated_files) - 20} more")
+                    _post_ui_call(self.app, log.write, f"  ... and {len(result.generated_files) - 20} more")
 
             if result.test_commands:
-                self.app.call_from_thread(log.log_info, "Test and validation commands:")
+                _post_ui_call(self.app, log.log_info, "Test and validation commands:")
                 for cmd in result.test_commands:
                     if cmd.startswith("# "):
-                        self.app.call_from_thread(log.write, f"  [dim]{cmd}[/]")
+                        _post_ui_call(self.app, log.write, f"  [dim]{cmd}[/]")
                     else:
-                        self.app.call_from_thread(log.write, f"  [bold green]{cmd}[/]")
+                        _post_ui_call(self.app, log.write, f"  [bold green]{cmd}[/]")
 
             val = result.validation_result
             if val:
@@ -463,37 +505,35 @@ class AutoEmuApp(App):
                 warnings = val.get("warnings", [])
                 skipped_qemu = any("QEMU source tree not found" in w for w in warnings)
                 if val.get("success") and not warnings:
-                    self.app.call_from_thread(log.log_success, f"Validation: {checked} file(s) checked, no errors")
+                    _post_ui_call(self.app, log.log_success, f"Validation: {checked} file(s) checked, no errors")
                 elif val.get("success") and skipped_qemu:
-                    self.app.call_from_thread(log.log_kind, "Validation: compilation skipped (no QEMU source tree)", "warn")
+                    _post_ui_call(self.app, log.log_kind, "Validation: compilation skipped (no QEMU source tree)", "warn")
                 elif val.get("success") and warnings:
-                    self.app.call_from_thread(
+                    _post_ui_call(
+                        self.app,
                         log.log_kind,
                         f"Validation: {checked} file(s) checked, {len(warnings)} warning(s)",
                         "warn",
                     )
                 elif errors:
-                    self.app.call_from_thread(log.log_error, f"Validation: {len(errors)} error(s) in {checked} file(s)")
+                    _post_ui_call(self.app, log.log_error, f"Validation: {len(errors)} error(s) in {checked} file(s)")
                     for err in errors[:10]:
-                        self.app.call_from_thread(
+                        _post_ui_call(
+                            self.app,
                             log.write,
                             f"  [red]{err.get('file', '?')}: {err.get('stderr', '')[:200]}[/]",
                         )
                 else:
-                    self.app.call_from_thread(log.log_error, f"Validation: {checked} file(s) checked, blocking warning(s)")
+                    _post_ui_call(self.app, log.log_error, f"Validation: {checked} file(s) checked, blocking warning(s)")
 
         except Exception as exc:
             import traceback
-            self.app.call_from_thread(log.log_error, f"Unexpected error: {exc}")
-            self.app.call_from_thread(log.write, f"[red]{traceback.format_exc()}[/]")
+            _post_ui_call(self.app, log.log_error, f"Unexpected error: {exc}")
+            _post_ui_call(self.app, log.write, f"[red]{traceback.format_exc()}[/]")
 
         finally:
             # Auto-save log after every run
-            try:
-                path = log.save_to_file()
-                self.app.call_from_thread(log.write, f"[dim]Log saved -> {path}[/]")
-            except Exception:
-                pass
+            _post_ui_call(self.app, _save_log_from_ui, log)
 
             btn = self.query_one("#btn-run", Button)
-            self.app.call_from_thread(setattr, btn, "disabled", False)
+            _post_ui_call(self.app, setattr, btn, "disabled", False)

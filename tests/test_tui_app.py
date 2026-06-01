@@ -37,15 +37,19 @@ def test_final_phase_status_marks_probe_done_on_success():
     assert ("set_phase_done", 5) in actions
 
 
-def test_schedule_progress_update_uses_call_from_thread_for_widget_updates():
-    """Worker-thread progress must be marshalled onto Textual's UI thread."""
-    calls: list[tuple[object, tuple[object, ...]]] = []
+def test_schedule_progress_update_posts_nonblocking_ui_messages():
+    """Worker-thread progress must not block on Textual UI rendering."""
+    messages: list[tui_app.UiThreadCall] = []
     log_messages: list[tuple[str, str]] = []
     phase_updates: list[int] = []
 
     class FakeApp:
+        def post_message(self, message):
+            messages.append(message)
+            return True
+
         def call_from_thread(self, func, *args):
-            calls.append((func, args))
+            raise AssertionError("progress updates must not block on call_from_thread")
 
     class FakePhases:
         def set_phase_running(self, phase):
@@ -64,12 +68,12 @@ def test_schedule_progress_update_uses_call_from_thread_for_widget_updates():
 
     tui_app._schedule_progress_update(FakeApp(), FakePhases(), FakeLog(), progress)
 
-    assert len(calls) == 2
+    assert len(messages) == 2
     assert phase_updates == []
     assert log_messages == []
 
-    for func, args in calls:
-        func(*args)
+    for message in messages:
+        tui_app._run_ui_thread_call(message)
 
     assert phase_updates == [5]
     assert log_messages == [

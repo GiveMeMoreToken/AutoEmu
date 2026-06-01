@@ -698,6 +698,8 @@ def test_run_qemu_probe_emits_stage5_command_and_output_logs(monkeypatch, tmp_pa
     assert "panfrost e82c0000.gpu: probe complete" in messages
     assert "Stage 5 guest stderr:" in messages
     assert "guest stderr line" in messages
+    assert "Stage 5 probe result: matched" in messages
+    assert "Stage 5 probe line: panfrost e82c0000.gpu: probe complete" in messages
 
 
 def test_run_qemu_probe_includes_poc_results_when_cve_findings(monkeypatch, tmp_path):
