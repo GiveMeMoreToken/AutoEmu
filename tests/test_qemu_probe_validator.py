@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from autoemu.validators.qemu_probe_validator import (
     _analyze_probe_log,
     _build_probe_overlay_source,

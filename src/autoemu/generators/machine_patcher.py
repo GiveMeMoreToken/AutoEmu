@@ -159,8 +159,6 @@ def generate_virt_patch(
     snake = _snake(peripheral.name)
     upper = _upper(peripheral.name)
     pfx = _device_prefix(peripheral)
-    pfx_upper = pfx.upper()
-    type_name = f"{pfx_upper}_{upper}"
     device_type = f"{pfx}-{snake}"
 
     base_addr = peripheral.base_address

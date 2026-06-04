@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from autoemu.generators.machine_patcher import (
     _replace_function_or_insert,
     apply_machine_patch,

@@ -340,7 +340,7 @@ def fetch_cve_driver_sources(
                 raw_url = url.replace("/blob/", "/raw/", 1)
             else:
                 raw_url = url
-            if not Path(path_str).suffix.lower() in (".c", ".h"):
+            if Path(path_str).suffix.lower() not in (".c", ".h"):
                 continue
 
             filename = Path(path_str).name

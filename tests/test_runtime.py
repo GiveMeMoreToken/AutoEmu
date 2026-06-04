@@ -14,6 +14,9 @@ from autoemu.agent.runtime import (
     AutoEmuAgentRuntime,
     PipelineProgress,
     _clear_output_dir,
+    _build_probe_fix_user_prompt,
+    _build_probe_fix_system_prompt,
+    MAX_PROBE_FIX_ATTEMPTS,
 )
 
 
@@ -149,14 +152,14 @@ def test_run_pipeline_calls_phases(monkeypatch, tmp_path):
         phases_seen.append("validate")
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         phases_seen.append("test")
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -182,13 +185,13 @@ def test_run_pipeline_emits_progress(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -243,13 +246,13 @@ def test_run_pipeline_fails_when_validation_fails(monkeypatch):
             "warnings": ["gpu_peripheral.json has base_address=0 - likely incorrect"],
         }
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -278,13 +281,13 @@ def test_run_pipeline_falls_back_on_agent_errors_when_local_valid(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
     result = runtime.run_pipeline(
@@ -312,13 +315,13 @@ def test_run_pipeline_generic_platform_detection(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -348,13 +351,13 @@ def test_run_pipeline_per_mcu_data_dirs(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
 
@@ -582,13 +585,13 @@ def test_run_pipeline_soft_fails_when_probe_fails(monkeypatch):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 1, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": False, "skipped": False, "reason": "ninja returned 1"}
 
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -630,7 +633,7 @@ def test_run_pipeline_cve_driver_fetch(monkeypatch, tmp_path):
     def fake_do_validate(self, output_dir, **kwargs):
         return {"success": True, "files_checked": 0, "errors": [], "warnings": []}
 
-    def fake_do_test(self, **kwargs):
+    def fake_agent_probe_loop(self, **kwargs):
         return {"success": True, "skipped": False, "reason": ""}
 
     monkeypatch.setattr("autoemu.cve_validator.run_cve_check", fake_run_cve_check)
@@ -638,7 +641,7 @@ def test_run_pipeline_cve_driver_fetch(monkeypatch, tmp_path):
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_fetch", fake_do_fetch)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_build", fake_do_build)
     monkeypatch.setattr(AutoEmuAgentRuntime, "_do_validate", fake_do_validate)
-    monkeypatch.setattr(AutoEmuAgentRuntime, "_do_test", fake_do_test)
+    monkeypatch.setattr(AutoEmuAgentRuntime, "_agent_probe_loop", fake_agent_probe_loop)
 
     runtime = AutoEmuAgentRuntime()
     result = runtime.run_pipeline(
@@ -651,3 +654,183 @@ def test_run_pipeline_cve_driver_fetch(monkeypatch, tmp_path):
     assert fetched["cve_id"] == "CVE-2021-1234"
     assert fetched["peripheral"] == "ETH"
     assert "driver/cve" in fetched["output_dir"]
+
+
+# ---------------------------------------------------------------------------
+# Probe fix loop (_agent_probe_loop)
+# ---------------------------------------------------------------------------
+
+
+def test_agent_probe_loop_succeeds_first_attempt(monkeypatch):
+    """When the probe succeeds on the first try, no agent is invoked."""
+    probe_calls: list[int] = []
+
+    def fake_run_probe_subprocess(**kwargs):
+        probe_calls.append(1)
+        return {"success": True, "probe_status": "matched", "reason": ""}
+
+    monkeypatch.setattr("autoemu.agent.runtime._run_probe_subprocess", fake_run_probe_subprocess)
+
+    runtime = AutoEmuAgentRuntime()
+    result = runtime._agent_probe_loop(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        output_dir="/tmp/fake",
+        build_result={},
+    )
+
+    assert result["success"] is True
+    assert len(probe_calls) == 1
+
+
+def test_agent_probe_loop_retries_after_agent_fix(monkeypatch, tmp_path):
+    """Probe fails once, agent fixes code, probe succeeds on second attempt."""
+    probe_calls: list[int] = []
+    agent_called = False
+
+    def fake_run_probe_subprocess(**kwargs):
+        probe_calls.append(1)
+        if len(probe_calls) == 1:
+            return {"success": False, "probe_status": "failed", "reason": "probe failed"}
+        return {"success": True, "probe_status": "matched", "reason": ""}
+
+    def fake_run_agent_task(backend_name, sys_prompt, user_msg, result, **kwargs):
+        nonlocal agent_called
+        agent_called = True
+        out_dir = kwargs.get("output_dir", "")
+        if out_dir:
+            (Path(out_dir) / "fixed.c").write_text("/* fixed */\n", encoding="utf-8")
+        result.files = {"fixed.c": "/* fixed */\n"}
+
+    monkeypatch.setattr("autoemu.agent.runtime._run_probe_subprocess", fake_run_probe_subprocess)
+    monkeypatch.setattr("autoemu.agent.runtime._run_agent_task", fake_run_agent_task)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._agent_probe_loop(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        output_dir=str(tmp_path),
+        build_result={},
+    )
+
+    assert result["success"] is True
+    assert len(probe_calls) == 2
+    assert agent_called
+
+
+def test_agent_probe_loop_exhausts_attempts(monkeypatch, tmp_path):
+    """After MAX_PROBE_FIX_ATTEMPTS failures, the loop returns the last result."""
+    probe_calls: list[int] = []
+
+    def fake_run_probe_subprocess(**kwargs):
+        probe_calls.append(1)
+        return {"success": False, "probe_status": "failed", "reason": "still broken"}
+
+    def fake_run_agent_task(backend_name, sys_prompt, user_msg, result, **kwargs):
+        out_dir = kwargs.get("output_dir", "")
+        if out_dir:
+            (Path(out_dir) / "fix.c").write_text("/* attempt */\n", encoding="utf-8")
+        result.files = {"fix.c": "/* attempt */\n"}
+
+    monkeypatch.setattr("autoemu.agent.runtime._run_probe_subprocess", fake_run_probe_subprocess)
+    monkeypatch.setattr("autoemu.agent.runtime._run_agent_task", fake_run_agent_task)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._agent_probe_loop(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        output_dir=str(tmp_path),
+        build_result={},
+    )
+
+    assert result["success"] is False
+    assert len(probe_calls) == MAX_PROBE_FIX_ATTEMPTS
+
+
+def test_agent_probe_loop_retries_when_agent_fails(monkeypatch, tmp_path):
+    """If the agent itself errors out, the loop retries all attempts."""
+    probe_calls: list[int] = []
+
+    def fake_run_probe_subprocess(**kwargs):
+        probe_calls.append(1)
+        return {"success": False, "probe_status": "failed", "reason": "compile error"}
+
+    def fake_run_agent_task(backend_name, sys_prompt, user_msg, result, **kwargs):
+        result.error = "backend not installed"
+        result.files = {}
+
+    monkeypatch.setattr("autoemu.agent.runtime._run_probe_subprocess", fake_run_probe_subprocess)
+    monkeypatch.setattr("autoemu.agent.runtime._run_agent_task", fake_run_agent_task)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._agent_probe_loop(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        output_dir=str(tmp_path),
+        build_result={},
+    )
+
+    assert result["success"] is False
+    # Loop retries all MAX_PROBE_FIX_ATTEMPTS even when agent fails
+    assert len(probe_calls) == 3
+
+
+def test_agent_probe_loop_retries_when_agent_returns_no_files(monkeypatch, tmp_path):
+    """If the agent returns no file changes, the loop retries all attempts."""
+    probe_calls: list[int] = []
+
+    def fake_run_probe_subprocess(**kwargs):
+        probe_calls.append(1)
+        return {"success": False, "probe_status": "inconclusive", "reason": "no probe lines"}
+
+    def fake_run_agent_task(backend_name, sys_prompt, user_msg, result, **kwargs):
+        result.files = {}
+        result.text = "I don't know what to fix"
+        result.error = ""
+
+    monkeypatch.setattr("autoemu.agent.runtime._run_probe_subprocess", fake_run_probe_subprocess)
+    monkeypatch.setattr("autoemu.agent.runtime._run_agent_task", fake_run_agent_task)
+
+    runtime = AutoEmuAgentRuntime(AgentRuntimeConfig(backend="codex-sdk"))
+    result = runtime._agent_probe_loop(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        output_dir=str(tmp_path),
+        build_result={},
+    )
+
+    assert result["success"] is False
+    # Loop retries all MAX_PROBE_FIX_ATTEMPTS even when agent returns no files
+    assert len(probe_calls) == 3
+
+
+def test_probe_fix_system_prompt_is_nonempty():
+    prompt = _build_probe_fix_system_prompt()
+    assert "QEMU" in prompt
+    assert "probe" in prompt.lower()
+
+
+def test_probe_fix_user_prompt_includes_feedback(tmp_path):
+    (tmp_path / "test.c").write_text("int x;\n", encoding="utf-8")
+    (tmp_path / "test.h").write_text("#define X 1\n", encoding="utf-8")
+
+    prompt = _build_probe_fix_user_prompt(
+        target_mcu="STM32F407VG",
+        target_peripheral="ETH",
+        probe_result={
+            "probe_status": "failed",
+            "reason": "probe returned -ENODEV",
+            "probe_log_tail": ["eth_probe: error -19"],
+        },
+        build_result={"compile_errors": [{"file": "test.c", "stderr": "implicit declaration"}]},
+        output_dir=str(tmp_path),
+    )
+
+    assert "STM32F407VG" in prompt
+    assert "ETH" in prompt
+    assert "failed" in prompt
+    assert "ENODEV" in prompt
+    assert "eth_probe" in prompt
+    assert "implicit declaration" in prompt
+    assert "int x;" in prompt
+    assert "#define X 1" in prompt

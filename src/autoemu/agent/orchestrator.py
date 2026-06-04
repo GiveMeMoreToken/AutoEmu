@@ -65,7 +65,7 @@ def _write_phase_log(
     log_path = log_dir / f"{ts}_{phase}_attempt{attempt}.txt"
 
     lines: list[str] = [
-        f"=== AutoEmu Agent Conversation Log ===",
+        "=== AutoEmu Agent Conversation Log ===",
         f"Timestamp: {ts} UTC",
         f"Phase: {phase}",
         f"Attempt: {attempt}",
@@ -85,7 +85,7 @@ def _write_phase_log(
         lines.append(f"[{etype}] {detail}")
 
     if error:
-        lines.extend(["", f"=== ERROR ===", error])
+        lines.extend(["", "=== ERROR ===", error])
 
     lines.append("")
     log_path.write_text("\n".join(lines), encoding="utf-8")
@@ -419,7 +419,7 @@ class AutoEmuOrchestrator:
                         elif event.type == "error":
                             total_cost += event.cost_usd
                             event_log.append({"type": "error", "detail": event.text})
-                            log_path = _write_phase_log(
+                            _write_phase_log(
                                 task.output_dir, phase, attempt, prompt, sys_prompt,
                                 event_log, error=event.text,
                             )

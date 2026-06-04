@@ -7,15 +7,18 @@ import inspect
 import json
 import logging
 import os
-import shutil
-import subprocess
-import sys
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from autoemu.agent.orchestrator import AutoEmuOrchestrator, FetchTask, ModelingTask
+from autoemu.agent.orchestrator import (
+    AutoEmuOrchestrator,
+    FetchTask,
+    ModelingTask,
+    _write_phase_log,
+)
 from autoemu.fetchers.generic import (
     GenericDataFetcher,
     _check_content,
@@ -45,6 +48,12 @@ SUPPORTED_AGENT_BACKENDS = {
 # Phase descriptors for the unified pipeline
 # ---------------------------------------------------------------------------
 
+MAX_PROBE_FIX_ATTEMPTS = 3
+_MAX_PROBE_FIX_CODE_BYTES = 8_000  # per-file truncation limit
+_MAX_PROBE_FIX_PROMPT_BYTES = 30_000  # total prompt size guard
+_PROBE_FIX_TIMEOUT_S = 300  # 5 minutes per agent call
+_PROBE_SUBPROCESS_TIMEOUT_S = 600  # 10 minutes per probe subprocess
+
 PIPELINE_PHASES = [
     "Detecting platform",
     "Fetching input data",
@@ -67,6 +76,15 @@ class PipelineProgress:
     # kind: "info" | "agent_thinking" | "agent_tool" | "agent_text" |
     #       "download" | "search" | "compile" | "warn" | "fail"
     kind: str = "info"
+
+
+@dataclass
+class AgentResult:
+    """Mutable container for agent probe-fix results."""
+
+    text: str = ""
+    files: dict[str, str] = field(default_factory=dict)
+    error: str = ""
 
 
 @dataclass
@@ -575,10 +593,11 @@ class AutoEmuAgentRuntime:
             def _emit_test(msg: str, kind: str = "info") -> None:
                 _emit(5, msg, kind)
 
-            probe_result = self._do_test(
+            probe_result = self._agent_probe_loop(
                 target_mcu=target_mcu,
                 target_peripheral=target_peripheral,
                 output_dir=output_dir,
+                build_result=build_result,
                 cve_findings=result.cve_findings,
                 on_progress=_emit_test,
             )
@@ -841,7 +860,6 @@ class AutoEmuAgentRuntime:
                     from autoemu.models.state_machine import StateMachine
                     from autoemu.models.interrupt import InterruptModel
                     from autoemu.models.dependency import DependencyGraph
-                    from autoemu.parsers.driver_parser import DriverAnalysis
 
                     register_blocks = {
                         target_peripheral: RegisterBlock.model_validate(agent_rb)
@@ -996,6 +1014,336 @@ class AutoEmuAgentRuntime:
         artifacts = fetch_result.get("artifacts", [])
         return sum(1 for a in artifacts if a.get("status") in ("downloaded", "cached"))
 
+    def _agent_probe_loop(
+        self,
+        *,
+        target_mcu: str,
+        target_peripheral: str,
+        output_dir: str,
+        build_result: dict[str, Any],
+        cve_findings: dict[str, Any] | None = None,
+        on_progress: Callable[[str, str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Run probe in a subprocess, retry with agent fixes on failure.
+
+        Each iteration:
+        1. Spawn ``scripts/probe_runner.py`` in its own process group.
+        2. If the subprocess hangs, kill the entire process group.
+        3. If probe succeeds → return.
+        4. Build a feedback prompt with the probe analysis and current code.
+        5. Ask the agent to fix the generated code.
+        6. Write fixed files back to the output directory.
+        7. Loop.
+        """
+        def _emit(msg: str, kind: str = "info") -> None:
+            if on_progress:
+                on_progress(msg, kind)
+
+        probe_result: dict[str, Any] = {}
+
+        for attempt in range(MAX_PROBE_FIX_ATTEMPTS):
+            if attempt > 0:
+                _emit(f"Probe fix attempt {attempt + 1}/{MAX_PROBE_FIX_ATTEMPTS} ...", "agent_thinking")
+
+            _emit(
+                f"Running QEMU probe (subprocess, attempt {attempt + 1}) ...",
+                "compile",
+            )
+            probe_result = _run_probe_subprocess(
+                target_mcu=target_mcu,
+                target_peripheral=target_peripheral,
+                output_dir=output_dir,
+                cve_findings=cve_findings,
+            )
+
+            if probe_result.get("success"):
+                if attempt > 0:
+                    _emit(f"Probe succeeded after {attempt} fix attempt(s)", "info")
+                return probe_result
+
+            probe_status = probe_result.get("probe_status", "unknown")
+            probe_reason = probe_result.get("reason", "")
+            _emit(f"Probe {probe_status}: {probe_reason}", "warn")
+
+            if attempt >= MAX_PROBE_FIX_ATTEMPTS - 1:
+                _emit("Max probe fix attempts reached", "warn")
+                return probe_result
+
+            # Ask the agent to fix the code.
+            _emit("Asking agent to fix generated code ...", "agent_thinking")
+
+            sys_prompt = _build_probe_fix_system_prompt()
+            user_msg = _build_probe_fix_user_prompt(
+                target_mcu=target_mcu,
+                target_peripheral=target_peripheral,
+                probe_result=probe_result,
+                build_result=build_result,
+                output_dir=output_dir,
+            )
+
+            # Guard against oversized prompts.
+            prompt_bytes = len(user_msg.encode("utf-8"))
+            if prompt_bytes > _MAX_PROBE_FIX_PROMPT_BYTES:
+                _emit(
+                    f"Probe fix prompt too large ({prompt_bytes} bytes), "
+                    f"truncating to {_MAX_PROBE_FIX_PROMPT_BYTES}",
+                    "warn",
+                )
+                user_msg = user_msg[:_MAX_PROBE_FIX_PROMPT_BYTES] + "\n\n---\n[Prompt truncated]\n"
+
+            result = AgentResult()
+            _run_agent_task(
+                self.config.backend,
+                sys_prompt,
+                user_msg,
+                result,
+                on_progress=on_progress,
+                phase_name="probe_fix",
+                output_dir=output_dir,
+            )
+
+            # Write agent log for the probe fix attempt.
+            try:
+                log_path = _write_phase_log(
+                    output_dir, "probe_fix", attempt,
+                    user_msg, sys_prompt, [], error=result.error or None,
+                )
+                _emit(f"Agent log written: {log_path}", "agent_text")
+            except Exception:
+                pass
+
+            # Save agent text output for debugging.
+            if result.text:
+                try:
+                    txt_path = Path(output_dir) / f"probe_fix_agent_text_{attempt}.txt"
+                    txt_path.write_text(result.text, encoding="utf-8")
+                except Exception:
+                    pass
+
+            if result.error:
+                _emit(f"Agent probe fix failed: {result.error}, retrying ...", "warn")
+                continue
+
+            written = len(result.files)
+            if written:
+                _emit(f"Agent updated {written} file(s), re-probing ...", "agent_text")
+            else:
+                _emit("Agent returned no file changes, retrying ...", "warn")
+                continue
+
+        return probe_result
+
+
+# ---------------------------------------------------------------------------
+# Subprocess-based probe runner
+# ---------------------------------------------------------------------------
+
+def _run_probe_subprocess(
+    *,
+    target_mcu: str,
+    target_peripheral: str,
+    output_dir: str,
+    cve_findings: dict[str, Any] | None = None,
+    timeout_s: float = _PROBE_SUBPROCESS_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Run the QEMU probe in a child process with timeout + kill.
+
+    Spawns ``scripts/probe_runner.py`` as a subprocess in its own process
+    group.  If the probe hangs (e.g. QEMU boot stalls), the entire process
+    group is killed after *timeout_s* seconds.
+
+    Returns the probe result dict on success, or a synthetic failure dict
+    on timeout / crash.
+    """
+    import subprocess as _sp
+    import sys as _sys
+
+    probe_script = str(Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "probe_runner.py")
+    cmd = [
+        _sys.executable,
+        probe_script,
+        "--output-dir", output_dir,
+        "--target-mcu", target_mcu,
+        "--target-peripheral", target_peripheral,
+    ]
+    if cve_findings:
+        cmd.extend(["--cve-findings", json.dumps(cve_findings)])
+
+    try:
+        proc = _sp.Popen(
+            cmd,
+            stdout=_sp.PIPE,
+            stderr=_sp.PIPE,
+            start_new_session=True,  # own process group for clean kill
+        )
+    except OSError as exc:
+        return {
+            "success": False,
+            "reason": f"Failed to start probe subprocess: {exc}",
+            "probe_status": "error",
+        }
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except _sp.TimeoutExpired:
+        # Kill the entire process group.
+        try:
+            os.killpg(os.getpgid(proc.pid), 15)  # SIGTERM
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except _sp.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+            except OSError:
+                pass
+            proc.wait(timeout=5)
+        return {
+            "success": False,
+            "reason": f"Probe subprocess timed out after {timeout_s}s",
+            "probe_status": "timeout",
+        }
+
+    if proc.returncode != 0:
+        stderr_tail = stderr.decode("utf-8", errors="replace").strip().split("\n")[-10:]
+        return {
+            "success": False,
+            "reason": f"Probe subprocess exited with code {proc.returncode}",
+            "probe_status": "error",
+            "probe_log_tail": stderr_tail,
+        }
+
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {
+            "success": False,
+            "reason": f"Failed to parse probe result: {exc}",
+            "probe_status": "error",
+        }
+
+    return result
+
+
+async def _run_probe_fix_agent(
+    backend_name: str,
+    system_prompt: str,
+    user_message: str,
+    output_dir: str,
+    *,
+    model: str | None = None,
+    max_budget_usd: float = 5.0,
+    timeout_s: float = _PROBE_FIX_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Run a minimal agent loop with a ``write_file`` tool for probe fixes.
+
+    Returns ``{"files": dict, "text": str, "error": str}``.
+    """
+    from autoemu.agent.backends import create_backend
+
+    out_path = Path(output_dir)
+    written_files: dict[str, str] = {}
+
+    async def _handle_write_file(args: dict[str, Any]) -> dict[str, Any]:
+        rel_path = str(args.get("file_path", "")).strip()
+        content = str(args.get("content", ""))
+        if not rel_path:
+            return {"content": [{"type": "text", "text": "Missing file_path"}], "is_error": True}
+        target = out_path / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        written_files[rel_path] = content
+        return {"content": [{"type": "text", "text": f"Wrote {rel_path}"}]}
+
+    from autoemu.agent.backend import ToolSpec
+
+    write_tool = ToolSpec(
+        name="write_file",
+        description="Write content to a file (relative to the output directory).",
+        parameters={"file_path": str, "content": str},
+        handler=_handle_write_file,
+    )
+
+    try:
+        backend = create_backend(backend_name, model=model)
+    except Exception as exc:
+        return {"files": {}, "text": "", "error": str(exc)}
+
+    text_parts: list[str] = []
+    error = ""
+
+    async def _run() -> None:
+        nonlocal error
+        async for event in backend.run(
+            user_message,
+            system_prompt=system_prompt,
+            tools=[write_tool],
+            model=model,
+            max_budget_usd=max_budget_usd,
+        ):
+            if event.type == "text":
+                text_parts.append(event.text)
+            elif event.type == "error":
+                error = event.text
+
+    try:
+        await asyncio.wait_for(_run(), timeout=timeout_s)
+    except TimeoutError:
+        error = f"Agent timed out after {timeout_s}s"
+    except Exception as exc:
+        error = str(exc)
+
+    # If the agent did not use the tool, try to parse files from the text.
+    if not written_files and text_parts:
+        combined = "\n".join(text_parts)
+        code_blocks = re.findall(r"```(?:c|dtso)?\n(.*?)```", combined, re.DOTALL)
+        generated_paths = [
+            p.name for p in sorted(out_path.glob("*.c"))
+            if p.name not in ("probe_log.txt",)
+        ] + [p.name for p in sorted(out_path.glob("*.h"))]
+        for idx, block in enumerate(code_blocks):
+            if idx < len(generated_paths):
+                rel = generated_paths[idx]
+                target = out_path / rel
+                target.write_text(block, encoding="utf-8")
+                written_files[rel] = block
+
+    if not written_files and not error:
+        error = "Agent returned no file changes"
+    elif written_files:
+        error = ""
+
+    return {"files": written_files, "text": "\n".join(text_parts), "error": error}
+
+
+def _run_agent_task(
+    backend_name: str,
+    system_prompt: str,
+    user_message: str,
+    result: AgentResult,
+    *,
+    on_progress: Callable[[str, str], None] | None = None,
+    phase_name: str = "",
+    model: str | None = None,
+    max_budget_usd: float = 5.0,
+    output_dir: str = "",
+) -> None:
+    """Synchronous wrapper that runs :func:`_run_probe_fix_agent`."""
+    agent_result = asyncio.run(
+        _run_probe_fix_agent(
+            backend_name,
+            system_prompt,
+            user_message,
+            output_dir,
+            model=model,
+            max_budget_usd=max_budget_usd,
+        )
+    )
+    result.text = agent_result.get("text", "")
+    result.files = agent_result.get("files", {})
+    result.error = agent_result.get("error", "")
+
 
 def _phase_agent_errors(*phase_results: dict[str, Any]) -> list[str]:
     """Return user-visible agent backend failures from phase result dicts."""
@@ -1125,6 +1473,155 @@ def _is_agent_filler(line: str) -> bool:
     return any(lower.startswith(p) for p in _FILLER_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Probe-fix prompt builders
+# ---------------------------------------------------------------------------
+
+def _build_probe_fix_system_prompt() -> str:
+    return (
+        "You are an expert embedded-systems engineer debugging a QEMU "
+        "peripheral model.  A Linux driver probe was attempted inside a QEMU "
+        "VM and failed.  Analyse the probe feedback, identify the root cause, "
+        "and fix the generated C/H/DTSO files so that the driver probes "
+        "successfully.\n\n"
+        "Guidelines:\n"
+        "- Focus on the specific errors reported; do not rewrite unrelated code.\n"
+        "- If a compile error is present, fix it first — the probe cannot succeed "
+        "if the QEMU build fails.\n"
+        "- If the driver does not bind, verify that the device-tree compatible "
+        "string, MMIO base/size, and register offsets match the driver's "
+        "expectations.\n"
+        "- If the driver probes but crashes, check register read/write handlers, "
+        "reset values, and interrupt wiring.\n"
+        "- Preserve the existing code structure and style."
+    )
+
+
+def _extract_code_summary(content: str, max_bytes: int) -> str:
+    """Extract the most relevant parts of a generated C/H file.
+
+    Strategy:
+    - Always include the first block (includes, top-level defines, struct).
+    - Skip repetitive ``#define *_OFFSET`` lines after the first few.
+    - Collapse long runs of trivial ``case`` / ``return s->field`` pairs.
+    - Include function signatures and non-trivial function bodies.
+    - Truncate to *max_bytes*.
+    """
+    lines = content.splitlines(keepends=True)
+    out: list[str] = []
+    total = 0
+    offset_defines_seen = 0
+    trivial_case_run = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Skip repetitive register-offset defines after the first few.
+        if stripped.startswith("#define ") and "_OFFSET" in stripped:
+            offset_defines_seen += 1
+            if offset_defines_seen <= 20:
+                out.append(line)
+                total += len(line.encode("utf-8"))
+            elif offset_defines_seen == 21:
+                out.append("    /* ... additional _OFFSET defines omitted ... */\n")
+                total += 60
+            continue
+
+        # Collapse long runs of trivial case+return pairs.
+        if stripped.startswith("case ") and stripped.endswith(":"):
+            trivial_case_run += 1
+            if trivial_case_run <= 10:
+                encoded_len = len(line.encode("utf-8"))
+                if total + encoded_len > max_bytes:
+                    break
+                out.append(line)
+                total += encoded_len
+            elif trivial_case_run == 11:
+                out.append("        /* ... additional trivial cases omitted ... */\n")
+                total += 60
+            continue
+
+        if trivial_case_run > 10 and stripped.startswith("return s->"):
+            continue  # skip trivial return after collapsed cases
+
+        trivial_case_run = 0
+
+        encoded_len = len(line.encode("utf-8"))
+        if total + encoded_len > max_bytes:
+            out.append(f"\n/* ... remaining code omitted ({len(content)} bytes total) ... */\n")
+            break
+        out.append(line)
+        total += encoded_len
+
+    return "".join(out)
+
+
+def _build_probe_fix_user_prompt(
+    *,
+    target_mcu: str,
+    target_peripheral: str,
+    probe_result: dict[str, Any],
+    build_result: dict[str, Any],
+    output_dir: str,
+) -> str:
+    probe_status = probe_result.get("probe_status", "unknown")
+    probe_reason = probe_result.get("reason", "")
+    probe_lines = probe_result.get("probe_log_tail", [])[:20]
+    compile_errors = build_result.get("compile_errors", [])
+
+    sections = [
+        f"## Probe feedback\n"
+        f"- MCU: {target_mcu}\n"
+        f"- Peripheral: {target_peripheral}\n"
+        f"- Status: {probe_status}\n"
+        f"- Reason: {probe_reason}",
+    ]
+
+    if probe_lines:
+        sections.append(
+            "## QEMU console log (tail)\n```\n"
+            + "\n".join(probe_lines)
+            + "\n```"
+        )
+
+    if compile_errors:
+        err_lines = []
+        for entry in compile_errors[:5]:
+            if isinstance(entry, dict):
+                fname = Path(entry.get("file", "")).name
+                stderr = str(entry.get("stderr", "")).strip()
+                err_lines.append(f"{fname}: {stderr}" if stderr else fname)
+            else:
+                err_lines.append(str(entry))
+        sections.append(
+            "## Compile errors\n```\n"
+            + "\n".join(err_lines)
+            + "\n```"
+        )
+
+    # Include current generated code (smart extraction for large files).
+    out_path = Path(output_dir)
+    code_blocks: list[str] = []
+    for ext in ("*.c", "*.h", "*.dtso"):
+        for fpath in sorted(out_path.glob(ext)):
+            rel = fpath.relative_to(out_path)
+            content = fpath.read_text(encoding="utf-8")
+            if len(content) > _MAX_PROBE_FIX_CODE_BYTES:
+                content = _extract_code_summary(content, _MAX_PROBE_FIX_CODE_BYTES)
+            code_blocks.append(f"### {rel}\n```c\n{content}\n```")
+    if code_blocks:
+        sections.append("## Current generated code\n" + "\n\n".join(code_blocks))
+
+    sections.append(
+        "## Task\n"
+        "Diagnose why the driver probe failed and fix the generated code.  "
+        "Use the `write_file` tool to write corrected files to the output directory.  "
+        "Focus on the specific error — do not rewrite code that is already correct."
+    )
+
+    return "\n\n".join(sections)
+
+
 __all__ = [
     "AgentRuntimeConfig",
     "AutoEmuAgentRuntime",
@@ -1132,4 +1629,5 @@ __all__ = [
     "PipelineResult",
     "PIPELINE_PHASES",
     "SUPPORTED_AGENT_BACKENDS",
+    "MAX_PROBE_FIX_ATTEMPTS",
 ]

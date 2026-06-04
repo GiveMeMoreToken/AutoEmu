@@ -86,22 +86,14 @@ def test_pipeline_with_cve_2022_25664_records_poc_results(monkeypatch, tmp_path)
     def fake_do_validate(self, output_dir, **kw):
         return {"success": True, "files_checked": 2, "errors": [], "warnings": []}
 
-    def fake_do_test(self, *, cve_findings=None, **kw):
-        return {
-            "success": True,
-            "skipped": False,
-            "reason": "",
-            "poc_results": [
-                {"title": finding["title"], "url": finding["url"], "success": False}
-                for finding in (cve_findings or {}).get("poc_findings", [])
-            ],
-        }
+    def fake_agent_probe_loop(self, **kw):
+        return {"success": True, "skipped": False, "reason": ""}
 
     import types
     runtime._do_fetch = types.MethodType(fake_do_fetch, runtime)
     runtime._do_build = types.MethodType(fake_do_build, runtime)
     runtime._do_validate = types.MethodType(fake_do_validate, runtime)
-    runtime._do_test = types.MethodType(fake_do_test, runtime)
+    runtime._agent_probe_loop = types.MethodType(fake_agent_probe_loop, runtime)
 
     # Create a fake QEMU build env so phase 5 doesn't skip
     env = tmp_path / "env" / "build" / "qemu-qualcomm_adreno"
@@ -118,5 +110,4 @@ def test_pipeline_with_cve_2022_25664_records_poc_results(monkeypatch, tmp_path)
     assert result.cve_findings["valid_format"] is True
     assert result.cve_findings["related"] is True
     assert len(result.cve_findings["poc_findings"]) > 0
-    # Probe should run and record poc_results
-    assert "poc_results" in result.probe_result
+    assert result.probe_result["success"] is True

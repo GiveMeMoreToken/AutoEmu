@@ -203,7 +203,7 @@ def run_qemu_probe(
     # ------------------------------------------------------------------
     script = Path("scripts/apply-to-qemu.py")
     if script.exists() and qemu_src is not None:
-        _log(f"Copying generated files into QEMU source tree ...", "info")
+        _log("Copying generated files into QEMU source tree ...", "info")
         cmd = [
             shutil.which("python3") or "python",
             str(script),
@@ -812,7 +812,7 @@ def _prepare_probe_rootfs(
 
     module_dir = "/lib/modules/autoemu-stage5"
     on_progress(
-        f"Preparing Stage 5 rootfs with Linux probe module(s): "
+        "Preparing Stage 5 rootfs with Linux probe module(s): "
         + ", ".join(path.name for path in modules),
         "compile",
     )
